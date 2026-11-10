@@ -393,6 +393,8 @@ pub const Proxy = struct {
         c.logged = true;
         c.method.set(req.method);
         c.host.set(host);
+        // Webhooks reach the panel through any public hostname.
+        const to_panel = std.mem.startsWith(u8, req.target, "/__pharbor/");
         // The query string may hold tokens, and logs get read by more people.
         c.path.set(req.target[0 .. std.mem.indexOfScalar(u8, req.target, '?') orelse req.target.len]);
         c.upgrade = req.upgrade;
@@ -415,6 +417,7 @@ pub const Proxy = struct {
         c.bytes_in = c.head_len;
         self.release(c);
 
+        if (to_panel and self.table.panel_port != 0) return self.startUpstream(c, self.table.panel_port);
         const r = self.table.lookup(host) orelse {
             if (self.table.panel_port != 0 and isAddress(host)) return self.startUpstream(c, self.table.panel_port);
             return self.respond(c, 404, "No service answers for this name.");

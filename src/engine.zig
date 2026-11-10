@@ -82,6 +82,23 @@ pub const Engine = struct {
         return exitCode(status);
     }
 
+    /// Runs `pdock` with its output going to `fd`, a deployment's log.
+    pub fn runTo(self: *Engine, args: []const []const u8, fd: i32) !u8 {
+        const argv = try self.argvZ(args);
+        const pid = try sys.fork();
+        if (pid == 0) {
+            const null_fd = sys.open("/dev/null", sys.O_RDWR, 0) catch linux.exit_group(127);
+            _ = linux.dup2(null_fd, 0);
+            _ = linux.dup2(fd, 1);
+            _ = linux.dup2(fd, 2);
+            _ = linux.execve(self.bin.ptr, argv.ptr, self.envp);
+            linux.exit_group(127);
+        }
+        var status: i32 = 0;
+        _ = linux.waitpid(pid, &status, 0);
+        return exitCode(status);
+    }
+
     /// Runs `pdock` and returns what it printed.
     pub fn output(self: *Engine, args: []const []const u8) !Output {
         const argv = try self.argvZ(args);

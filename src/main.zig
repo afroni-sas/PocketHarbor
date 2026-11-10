@@ -15,6 +15,8 @@ const httpd = @import("httpd.zig");
 const crypto = @import("crypto.zig");
 const auth_mod = @import("auth.zig");
 const vars_mod = @import("vars.zig");
+const dns = @import("dns.zig");
+const github = @import("github.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
@@ -35,6 +37,12 @@ const usage =
     \\  deploy NAME [options]              Deploy a new version without downtime
     \\      --project NAME, --env NAME     Where it belongs (default: default, production)
     \\      --image IMAGE                  Image to run
+    \\      --repo OWNER/NAME              Build from GitHub instead
+    \\      --branch NAME                  Branch to build and watch (default main)
+    \\      --root-dir DIR                 Directory to build, for monorepos
+    \\      --build-command CMD            Replaces the detected build step
+    \\      --start-command CMD            Replaces what the image runs
+    \\      --no-auto-deploy               Do not deploy on each push
     \\      --port N                       Port the app listens on (default: detect)
     \\      --domain NAME                  Hostname to answer for (repeatable)
     \\      -e, --env KEY=VALUE            Environment variable (repeatable)
@@ -67,6 +75,10 @@ const usage =
     \\  var set NAME KEY=VALUE... | var set --shared KEY=VALUE...
     \\  var unset NAME KEY... | var import NAME FILE.env
     \\
+    \\GitHub
+    \\  github token TOKEN|--clear         For private repositories
+    \\  github webhook                     The secret to give GitHub, for deploys on push
+    \\
     \\Accounts (the panel is at the phone's address, port 8080)
     \\  user add EMAIL                     Reads the password from stdin
     \\  user ls | rm EMAIL | reset-2fa EMAIL
@@ -80,7 +92,8 @@ const usage =
     \\
     \\  version
     \\
-    \\Environment: PHARBOR_ROOT (data directory), PDOCK_BIN (path to pdock)
+    \\Environment: PHARBOR_ROOT (data directory), PDOCK_BIN (path to pdock),
+    \\  PHARBOR_GITHUB_API (GitHub Enterprise: https://HOST/api/v3)
     \\
 ;
 
@@ -134,7 +147,9 @@ pub fn main(init: std.process.Init) !void {
     const envp: engine.Envp = @ptrCast(block.slice.ptr);
     const eng = try a.create(Engine);
     eng.* = .{ .a = a, .bin = try engine.locate(a, init.environ_map), .envp = envp };
-    var ctx: Ctx = .{ .a = a, .gpa = init.gpa, .store = store, .eng = eng, .envp = envp, .env = init.environ_map, .io = init.io };
+    // Android has no resolv.conf; builds download from GitHub.
+    const io = dns.wrapIo(init.io, init.environ_map.get("POCKETDOCK_DNS"));
+    var ctx: Ctx = .{ .a = a, .gpa = init.gpa, .store = store, .eng = eng, .envp = envp, .env = init.environ_map, .io = io };
 
     const commands = .{
         .{ "serve", cmdServe },
@@ -155,6 +170,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "user", cmdUser },
         .{ "token", cmdToken },
         .{ "var", cmdVar },
+        .{ "github", cmdGithub },
     };
     inline for (commands) |c| {
         if (eql(cmd, c[0])) {
@@ -301,7 +317,13 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
 
 fn cmdDeployJob(c: *Ctx, args: []const [:0]const u8) !void {
     if (args.len != 2) return;
-    deploy.run(c.store, c.eng, try varsFor(c), args[0], .{ .trigger = args[1], .echo = false }) catch {};
+    deploy.run(c.store, c.eng, try varsFor(c), args[0], .{
+        .gpa = c.gpa,
+        .io = c.io,
+        .trigger = args[1],
+        .echo = false,
+        .github_api = c.env.get("PHARBOR_GITHUB_API") orelse "",
+    }) catch {};
 }
 
 fn varsFor(c: *Ctx) !vars_mod.Vars {
@@ -357,6 +379,37 @@ fn cmdVar(c: *Ctx, args: []const [:0]const u8) !void {
     const current = try vars.get(scope.project, scope.environment, service);
     vars.put(scope.project, scope.environment, service, try vars_mod.merge(c.a, current, set.items, unset.items)) catch |e| die("{s}", .{@errorName(e)});
     sys.print("Saved. Deploy for the change to take effect.\n", .{});
+}
+
+fn cmdGithub(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 0) die("usage: pharbor github token TOKEN|--clear | webhook", .{});
+    const key = try crypto.loadKey(c.store.root);
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    var s = c.store.settings();
+    if (eql(args[0], "token") and args.len == 2) {
+        s.github_token = if (eql(args[1], "--clear")) "" else try crypto.seal(c.a, key, args[1]);
+        try c.store.saveSettings(s);
+        return;
+    }
+    if (eql(args[0], "webhook")) {
+        if (s.webhook_secret.len == 0) {
+            var raw: [24]u8 = undefined;
+            crypto.random(&raw);
+            s.webhook_secret = try crypto.seal(c.a, key, try crypto.hex(c.a, &raw));
+            try c.store.saveSettings(s);
+        }
+        sys.print(
+            \\In the repository's settings on GitHub, add a webhook:
+            \\  Payload URL:  https://YOUR-PUBLIC-HOSTNAME/__pharbor/webhooks/github
+            \\  Content type: application/json
+            \\  Secret:       {s}
+            \\  Events:       just the push event
+            \\
+        , .{try crypto.open(c.a, key, s.webhook_secret)});
+        return;
+    }
+    die("usage: pharbor github token TOKEN|--clear | webhook", .{});
 }
 
 fn authFor(c: *Ctx) !auth_mod.Auth {
@@ -501,7 +554,7 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
 
 fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     var opts: deploy.Options = .{};
-    var run_opts: deploy.RunOptions = .{};
+    var run_opts: deploy.RunOptions = .{ .gpa = c.gpa, .io = c.io, .github_api = c.env.get("PHARBOR_GITHUB_API") orelse "" };
     var scope: Scope = .{};
     var name: ?[]const u8 = null;
     var domains: std.ArrayList([]const u8) = .empty;
@@ -513,6 +566,19 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
             continue;
         } else if (eql(o, "--image")) {
             opts.image = value(args, &i);
+        } else if (eql(o, "--repo")) {
+            opts.repo = github.normalizeRepo(value(args, &i)) orelse die("--repo takes owner/name or a github.com URL", .{});
+        } else if (eql(o, "--branch")) {
+            opts.branch = value(args, &i);
+        } else if (eql(o, "--root-dir")) {
+            opts.root_dir = value(args, &i);
+            if (std.mem.indexOf(u8, opts.root_dir.?, "..") != null) die("--root-dir must stay inside the repository", .{});
+        } else if (eql(o, "--build-command")) {
+            opts.build_command = value(args, &i);
+        } else if (eql(o, "--start-command")) {
+            opts.start_command = value(args, &i);
+        } else if (eql(o, "--no-auto-deploy")) {
+            opts.auto_deploy = false;
         } else if (eql(o, "--port")) {
             opts.port = std.fmt.parseInt(u16, value(args, &i), 10) catch die("invalid port", .{});
         } else if (eql(o, "--domain")) {
@@ -590,10 +656,8 @@ fn cmdRm(c: *Ctx, args: []const [:0]const u8) !void {
     const svc = scope.load(c, n);
     const lock = try c.store.lock();
     defer c.store.unlock(lock);
-    (try varsFor(c)).dropService(svc.project, svc.environment, svc.name);
-    c.store.remove(c.store.idOf(svc));
+    deploy.forget(c.store, c.eng, try varsFor(c), svc);
     c.store.syncRoutes();
-    if (svc.container.len > 0) c.eng.remove(svc.container);
     sys.print("Removed {s}\n", .{svc.name});
 }
 
@@ -630,9 +694,7 @@ fn cmdProject(c: *Ctx, args: []const [:0]const u8) !void {
     } else if (eql(verb, "rm")) {
         if (!c.store.projectExists(name)) die("no project named {s}", .{name});
         for (try c.store.list()) |svc| {
-            if (!eql(svc.project, name)) continue;
-            c.store.remove(c.store.idOf(svc));
-            if (svc.container.len > 0) c.eng.remove(svc.container);
+            if (eql(svc.project, name)) deploy.forget(c.store, c.eng, try varsFor(c), svc);
         }
         const p = try c.store.loadProject(name);
         for (p.environments) |e| (try varsFor(c)).dropEnvironment(name, e);
@@ -671,10 +733,7 @@ fn cmdEnv(c: *Ctx, args: []const [:0]const u8) !void {
         if (eql(n, store_mod.default_environment)) die("the production environment cannot be removed", .{});
         const lock = try c.store.lock();
         defer c.store.unlock(lock);
-        for (try c.store.listIn(scope.project, n)) |svc| {
-            c.store.remove(c.store.idOf(svc));
-            if (svc.container.len > 0) c.eng.remove(svc.container);
-        }
+        for (try c.store.listIn(scope.project, n)) |svc| deploy.forget(c.store, c.eng, try varsFor(c), svc);
         (try varsFor(c)).dropEnvironment(scope.project, n);
         var p = try c.store.loadProject(scope.project);
         var kept: std.ArrayList([]const u8) = .empty;

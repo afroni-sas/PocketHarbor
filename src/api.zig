@@ -10,6 +10,7 @@ const crypto = @import("crypto.zig");
 const deploy = @import("deploy.zig");
 const store_mod = @import("store.zig");
 const vars_mod = @import("vars.zig");
+const github = @import("github.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -66,6 +67,9 @@ pub fn handle(raw: *anyopaque, req: *Request, res: *Response) void {
         .eng = .{ .a = req.a, .bin = panel.pdock, .envp = panel.envp },
         .vars = .{ .store = store, .key = panel.key },
     };
+    if (std.mem.eql(u8, req.path, "/__pharbor/webhooks/github")) {
+        return webhook(&c) catch |e| res.fail(500, @errorName(e));
+    }
     if (!std.mem.startsWith(u8, req.path, "/api/")) return serveAsset(&c);
     route(&c) catch |e| {
         if (!res.sent) res.fail(500, @errorName(e));
@@ -162,6 +166,7 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "projects")) return projects(c, seg[1..]);
     if (eql(seg[0], "services")) return services(c, seg[1..]);
     if (eql(seg[0], "settings")) return settings(c);
+    if (eql(seg[0], "github")) return githubSettings(c, seg[1..]);
     c.res.fail(404, "not found");
 }
 
@@ -294,6 +299,12 @@ const ServiceView = struct {
     environment: []const u8,
     name: []const u8,
     image: []const u8,
+    repo: []const u8,
+    branch: []const u8,
+    root_dir: []const u8,
+    auto_deploy: bool,
+    build_command: []const u8,
+    start_command: []const u8,
     port: u16,
     domains: []const []const u8,
     hostnames: []const []const u8,
@@ -315,6 +326,12 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .environment = svc.environment,
         .name = svc.name,
         .image = svc.image,
+        .repo = svc.repo,
+        .branch = svc.branch,
+        .root_dir = svc.root_dir,
+        .auto_deploy = svc.auto_deploy,
+        .build_command = svc.build_command,
+        .start_command = svc.start_command,
         .port = svc.port,
         .domains = svc.domains,
         .hostnames = try c.store.hostnames(svc, c.store.settings()),
@@ -373,9 +390,7 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
         const lock = try c.store.lock();
         defer c.store.unlock(lock);
         for (try c.store.list()) |svc| {
-            if (!eql(svc.project, name)) continue;
-            c.store.remove(c.store.idOf(svc));
-            if (svc.container.len > 0) c.eng.remove(svc.container);
+            if (eql(svc.project, name)) deploy.forget(c.store, &c.eng, c.vars, svc);
         }
         for ((try c.store.loadProject(name)).environments) |e| c.vars.dropEnvironment(name, e);
         c.store.removeProject(name);
@@ -400,10 +415,7 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
         if (eql(env, store_mod.default_environment)) return c.res.fail(409, "production cannot be removed");
         const lock = try c.store.lock();
         defer c.store.unlock(lock);
-        for (try c.store.listIn(name, env)) |svc| {
-            c.store.remove(c.store.idOf(svc));
-            if (svc.container.len > 0) c.eng.remove(svc.container);
-        }
+        for (try c.store.listIn(name, env)) |svc| deploy.forget(c.store, &c.eng, c.vars, svc);
         c.vars.dropEnvironment(name, env);
         var p = try c.store.loadProject(name);
         var kept: std.ArrayList([]const u8) = .empty;
@@ -423,6 +435,12 @@ const ServiceInput = struct {
     environment: ?[]const u8 = null,
     name: ?[]const u8 = null,
     image: ?[]const u8 = null,
+    repo: ?[]const u8 = null,
+    branch: ?[]const u8 = null,
+    root_dir: ?[]const u8 = null,
+    auto_deploy: ?bool = null,
+    build_command: ?[]const u8 = null,
+    start_command: ?[]const u8 = null,
     port: ?u16 = null,
     domains: ?[]const []const u8 = null,
     env: ?[]const []const u8 = null,
@@ -434,7 +452,22 @@ const ServiceInput = struct {
 };
 
 fn applyInput(svc: *Service, in: ServiceInput) !void {
-    if (in.image) |v| svc.image = v;
+    if (in.image) |v| {
+        svc.image = v;
+        if (v.len > 0) svc.repo = "";
+    }
+    if (in.repo) |v| {
+        svc.repo = if (v.len == 0) "" else github.normalizeRepo(v) orelse return error.BadRepo;
+        if (svc.repo.len > 0) svc.image = "";
+    }
+    if (in.branch) |v| svc.branch = v;
+    if (in.root_dir) |v| {
+        if (std.mem.indexOf(u8, v, "..") != null) return error.BadRootDir;
+        svc.root_dir = v;
+    }
+    if (in.auto_deploy) |v| svc.auto_deploy = v;
+    if (in.build_command) |v| svc.build_command = v;
+    if (in.start_command) |v| svc.start_command = v;
     if (in.port) |v| svc.port = v;
     if (in.domains) |v| {
         for (v) |d| if (!store_mod.validDomain(d)) return error.BadDomain;
@@ -501,7 +534,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
                 c.vars.put(project, env, name, parsed) catch return c.res.fail(400, "invalid variable name");
             }
         }
-        if (in.deploy and svc.image.len > 0) startDeploy(c, c.store.idOf(svc), "api");
+        if (in.deploy and (svc.image.len > 0 or svc.repo.len > 0)) startDeploy(c, c.store.idOf(svc), "api");
         return c.res.json(201, try serviceView(c, svc));
     }
     if (seg.len == 0) return c.res.fail(405, "method not allowed");
@@ -528,10 +561,8 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         if (method(c, "DELETE")) {
             const lock = try c.store.lock();
             defer c.store.unlock(lock);
-            c.vars.dropService(svc.project, svc.environment, svc.name);
-            c.store.remove(id);
+            deploy.forget(c.store, &c.eng, c.vars, svc);
             c.store.syncRoutes();
-            if (svc.container.len > 0) c.eng.remove(svc.container);
             return c.res.json(200, .{ .ok = true });
         }
         return c.res.fail(405, "method not allowed");
@@ -539,7 +570,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
     const what = seg[1];
     if (eql(what, "variables")) return variables(c, svc.project, svc.environment, svc.name, seg[2..]);
     if (eql(what, "deploy") and method(c, "POST")) {
-        if (svc.image.len == 0) return c.res.fail(400, "set an image first");
+        if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");
         startDeploy(c, id, "api");
         return c.res.json(202, .{ .ok = true });
     }
@@ -626,8 +657,68 @@ fn lastLines(text: []const u8, n: usize) []const u8 {
     return text;
 }
 
+fn webhookSecret(c: *Ctx) ![]const u8 {
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    var s = c.store.settings();
+    if (s.webhook_secret.len == 0) {
+        var raw: [24]u8 = undefined;
+        crypto.random(&raw);
+        s.webhook_secret = try crypto.seal(c.a, c.panel.key, try crypto.hex(c.a, &raw));
+        try c.store.saveSettings(s);
+    }
+    return crypto.open(c.a, c.panel.key, s.webhook_secret);
+}
+
+fn githubSettings(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 0 and method(c, "GET")) {
+        return c.res.json(200, .{
+            .has_token = c.store.settings().github_token.len > 0,
+            .webhook_path = "/__pharbor/webhooks/github",
+            .webhook_secret = try webhookSecret(c),
+        });
+    }
+    if (seg.len == 0 and method(c, "PUT")) {
+        const body = c.req.json(struct { token: []const u8 }) catch return c.res.fail(400, "send token");
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        var s = c.store.settings();
+        s.github_token = if (body.token.len == 0) "" else try crypto.seal(c.a, c.panel.key, body.token);
+        try c.store.saveSettings(s);
+        return c.res.json(200, .{ .has_token = body.token.len > 0 });
+    }
+    c.res.fail(404, "not found");
+}
+
+/// A push on GitHub deploys every service that follows that branch.
+fn webhook(c: *Ctx) !void {
+    if (!method(c, "POST")) return c.res.fail(405, "method not allowed");
+    const signature = c.req.header("x-hub-signature-256") orelse return c.res.fail(401, "unsigned");
+    if (!github.verifySignature(try webhookSecret(c), c.req.body, signature)) return c.res.fail(401, "bad signature");
+    const event = c.req.header("x-github-event") orelse "";
+    if (eql(event, "ping")) return c.res.json(200, .{ .ok = true });
+    if (!eql(event, "push")) return c.res.json(202, .{ .ignored = event });
+    const Push = struct { ref: []const u8 = "", repository: struct { full_name: []const u8 = "" } = .{}, deleted: bool = false };
+    const push = c.req.json(Push) catch return c.res.fail(400, "unreadable payload");
+    if (push.deleted or !std.mem.startsWith(u8, push.ref, "refs/heads/")) return c.res.json(202, .{ .deployed = 0 });
+    const branch = push.ref["refs/heads/".len..];
+    var started: usize = 0;
+    for (try c.store.list()) |svc| {
+        if (!svc.auto_deploy or !std.ascii.eqlIgnoreCase(svc.repo, push.repository.full_name) or !eql(svc.branch, branch)) continue;
+        startDeploy(c, c.store.idOf(svc), "webhook");
+        started += 1;
+    }
+    c.res.json(202, .{ .deployed = started });
+}
+
 fn settings(c: *Ctx) !void {
-    if (method(c, "GET")) return c.res.json(200, c.store.settings());
+    if (method(c, "GET")) {
+        var s = c.store.settings();
+        // Never sent back; the GitHub endpoint says whether they are set.
+        s.github_token = if (s.github_token.len > 0) "set" else "";
+        s.webhook_secret = "";
+        return c.res.json(200, s);
+    }
     if (method(c, "PATCH")) {
         const in = c.req.json(struct { base_domain: ?[]const u8 = null, panel_domain: ?[]const u8 = null }) catch return c.res.fail(400, "invalid settings");
         const lock = try c.store.lock();

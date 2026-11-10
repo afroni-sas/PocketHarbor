@@ -33,6 +33,15 @@ pub const Service = struct {
     environment: []const u8 = default_environment,
     name: []const u8,
     image: []const u8 = "",
+    /// "owner/name" on GitHub, built on each deployment. Empty for an image.
+    repo: []const u8 = "",
+    branch: []const u8 = "main",
+    /// The directory of the repository to build, for monorepos.
+    root_dir: []const u8 = "",
+    /// Deploy on every push to the branch.
+    auto_deploy: bool = true,
+    build_command: []const u8 = "",
+    start_command: []const u8 = "",
     /// The port the app listens on inside its container; 0 means detect it.
     port: u16 = 0,
     domains: []const []const u8 = &.{},
@@ -60,6 +69,9 @@ pub const Deployment = struct {
     image: []const u8 = "",
     /// What asked for it: "cli", "api", "webhook" or "rollback".
     trigger: []const u8 = "cli",
+    /// For a build from GitHub: the commit, shortened, and its title.
+    commit: []const u8 = "",
+    message: []const u8 = "",
     container: []const u8 = "",
     reason: []const u8 = "",
     created_at: i64 = 0,
@@ -78,6 +90,10 @@ pub const Settings = struct {
     /// The panel answers here, and at the phone's own address.
     panel_domain: []const u8 = "",
     panel_port: u16 = 8090,
+    /// Encrypted. Lets builds read private repositories.
+    github_token: []const u8 = "",
+    /// Encrypted. GitHub signs webhook deliveries with it.
+    webhook_secret: []const u8 = "",
 };
 
 /// Names end up in hostnames and file paths.
