@@ -20,6 +20,11 @@ pub const Project = struct {
     name: []const u8,
     environments: []const []const u8 = &.{"production"},
     created_at: i64 = 0,
+
+    pub fn hasEnvironment(self: Project, name: []const u8) bool {
+        for (self.environments) |e| if (std.mem.eql(u8, e, name)) return true;
+        return false;
+    }
 };
 
 /// One service in one environment of a project.

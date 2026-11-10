@@ -7,6 +7,8 @@ const sys = @import("sys.zig");
 const net = @import("net.zig");
 const engine = @import("engine.zig");
 const store_mod = @import("store.zig");
+const vars_mod = @import("vars.zig");
+const crypto = @import("crypto.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Deployment = store_mod.Deployment;
@@ -29,23 +31,7 @@ const drain_ms = 3000;
 const default_port: u16 = 8080;
 const default_timeout_s = 180;
 
-fn setEnv(a: Allocator, env: *std.ArrayList([]const u8), entry: []const u8) !void {
-    const key_end = (std.mem.indexOfScalar(u8, entry, '=') orelse return error.BadEnv) + 1;
-    for (env.items) |*e| {
-        if (std.mem.startsWith(u8, e.*, entry[0..key_end])) {
-            e.* = entry;
-            return;
-        }
-    }
-    try env.append(a, entry);
-}
 
-fn hasEnv(env: []const []const u8, key: []const u8) bool {
-    for (env) |e| {
-        if (e.len > key.len and e[key.len] == '=' and std.mem.startsWith(u8, e, key)) return true;
-    }
-    return false;
-}
 
 fn nowS() i64 {
     return @intCast(@divFloor(sys.nowNs(), std.time.ns_per_s));
@@ -122,7 +108,7 @@ fn explain(e: anyerror) []const u8 {
 }
 
 /// Merges what the CLI was given into the service's saved definition.
-pub fn configure(store: Store, name: []const u8, opts: Options) !Service {
+pub fn configure(store: Store, vars: vars_mod.Vars, name: []const u8, opts: Options) !Service {
     const a = store.a;
     const id = store.idFrom(opts.project, opts.environment, name);
     var svc: Service = if (store.exists(id))
@@ -134,10 +120,11 @@ pub fn configure(store: Store, name: []const u8, opts: Options) !Service {
     if (opts.health_path) |p| svc.health_path = p;
     if (opts.sleep_after_s) |s| svc.sleep_after_s = s;
 
-    var env: std.ArrayList([]const u8) = .empty;
-    try env.appendSlice(a, svc.env);
-    for (opts.env) |e| try setEnv(a, &env, e);
-    svc.env = env.items;
+    var set: std.ArrayList(vars_mod.Var) = .empty;
+    for (opts.env) |e| {
+        const eq = std.mem.indexOfScalar(u8, e, '=') orelse return error.BadEnv;
+        try set.append(a, .{ .name = e[0..eq], .value = e[eq + 1 ..] });
+    }
 
     var domains: std.ArrayList([]const u8) = .empty;
     try domains.appendSlice(a, svc.domains);
@@ -152,6 +139,10 @@ pub fn configure(store: Store, name: []const u8, opts: Options) !Service {
     const lock = try store.lock();
     defer store.unlock(lock);
     try store.ensureEnvironment(svc.project, svc.environment);
+    // Includes variables kept in the service from before they had a store.
+    const current = try vars.get(svc.project, svc.environment, svc.name);
+    try vars.put(svc.project, svc.environment, svc.name, try vars_mod.merge(a, current, set.items, &.{}));
+    svc.env = &.{};
     try store.save(svc);
     return svc;
 }
@@ -174,7 +165,7 @@ pub const RunOptions = struct {
 };
 
 /// Ships the service's saved definition.
-pub fn run(store: Store, eng: *Engine, id: []const u8, opts: RunOptions) !void {
+pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts: RunOptions) !void {
     const a = store.a;
     const service_lock = try lockService(store, id);
     defer sys.close(service_lock);
@@ -207,7 +198,7 @@ pub fn run(store: Store, eng: *Engine, id: []const u8, opts: RunOptions) !void {
     defer sys.close(log.fd);
     log.say("Deployment {d} of {s}: {s}", .{ number, svc.name, svc.image });
 
-    ship(store, eng, id, &svc, &record, log, opts) catch |e| {
+    ship(store, eng, vars, id, &svc, &record, log, opts) catch |e| {
         log.say("Deployment failed: {s}", .{explain(e)});
         record.status = "failed";
         record.reason = explain(e);
@@ -218,17 +209,24 @@ pub fn run(store: Store, eng: *Engine, id: []const u8, opts: RunOptions) !void {
     };
 }
 
-fn ship(store: Store, eng: *Engine, id: []const u8, svc: *Service, record: *Deployment, log: Log, opts: RunOptions) !void {
+fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *Service, record: *Deployment, log: Log, opts: RunOptions) !void {
     const a = store.a;
     const container = record.container;
     eng.remove(container);
 
+    var warnings: std.ArrayList([]const u8) = .empty;
+    const env = try vars.resolve(svc.*, &warnings);
+    for (warnings.items) |w| log.say("warning: {s}", .{w});
+    try saveSnapshot(store, vars, id, record.number, env);
+
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(a, &.{ "run", "-d", "--name", container, "--restart", "always" });
-    if (!hasEnv(svc.env, "PORT")) {
+    try args.appendSlice(a, &.{ "run", "-d", "--name", container, "--restart", "always", "--hostname", store.publicLabel(svc.*) });
+    var has_port = false;
+    for (env) |v| has_port = has_port or std.mem.eql(u8, v.name, "PORT");
+    if (!has_port) {
         try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "PORT={d}", .{if (svc.port != 0) svc.port else default_port}) });
     }
-    for (svc.env) |e| try args.appendSlice(a, &.{ "-e", e });
+    for (env) |v| try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
     try args.append(a, svc.image);
 
     log.say("Starting the container", .{});
@@ -280,6 +278,14 @@ fn ship(store: Store, eng: *Engine, id: []const u8, svc: *Service, record: *Depl
         eng.remove(old);
     }
     log.say("Deployed {s}", .{svc.name});
+}
+
+/// What a deployment ran with, so that it can be run again exactly.
+fn saveSnapshot(store: Store, vars: vars_mod.Vars, id: []const u8, number: u32, env: []const vars_mod.Var) !void {
+    const json = try std.json.Stringify.valueAlloc(store.a, env, .{});
+    const sealed = try crypto.seal(store.a, vars.key, json);
+    const file = try std.fmt.allocPrint(store.a, "{s}/{d}.env", .{ store.deploymentDir(id), number });
+    try sys.writeFileAtomic(file, sealed, 0o600);
 }
 
 fn retirePrevious(store: Store, id: []const u8, number: u32) void {
@@ -343,10 +349,11 @@ pub fn sleep(store: Store, eng: *Engine, id: []const u8) void {
 
 /// Copies a project's service definitions into a new environment, without
 /// their deployments or hostnames: those belong to the environment they came from.
-pub fn duplicateEnvironment(store: Store, project: []const u8, from: []const u8, to: []const u8) !usize {
+pub fn duplicateEnvironment(store: Store, vars: vars_mod.Vars, project: []const u8, from: []const u8, to: []const u8) !usize {
     const lock = try store.lock();
     defer store.unlock(lock);
     try store.ensureEnvironment(project, to);
+    vars.copyEnvironment(project, from, to);
     var count: usize = 0;
     for (try store.listIn(project, from)) |svc| {
         var copy = svc;

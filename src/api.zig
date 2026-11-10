@@ -9,6 +9,7 @@ const auth_mod = @import("auth.zig");
 const crypto = @import("crypto.zig");
 const deploy = @import("deploy.zig");
 const store_mod = @import("store.zig");
+const vars_mod = @import("vars.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -40,6 +41,7 @@ const Ctx = struct {
     store: Store,
     auth: Auth,
     eng: engine.Engine,
+    vars: vars_mod.Vars,
     who: auth_mod.Who = .{},
 };
 
@@ -62,6 +64,7 @@ pub fn handle(raw: *anyopaque, req: *Request, res: *Response) void {
         .store = store,
         .auth = .{ .store = store, .io = panel.io, .key = panel.key },
         .eng = .{ .a = req.a, .bin = panel.pdock, .envp = panel.envp },
+        .vars = .{ .store = store, .key = panel.key },
     };
     if (!std.mem.startsWith(u8, req.path, "/api/")) return serveAsset(&c);
     route(&c) catch |e| {
@@ -374,6 +377,7 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
             c.store.remove(c.store.idOf(svc));
             if (svc.container.len > 0) c.eng.remove(svc.container);
         }
+        for ((try c.store.loadProject(name)).environments) |e| c.vars.dropEnvironment(name, e);
         c.store.removeProject(name);
         c.store.syncRoutes();
         return c.res.json(200, .{ .ok = true });
@@ -381,8 +385,15 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
     if (seg.len == 2 and eql(seg[1], "environments") and method(c, "POST")) {
         const body = c.req.json(struct { name: []const u8, from: []const u8 = store_mod.default_environment }) catch return c.res.fail(400, "send name");
         if (!validName(body.name)) return c.res.fail(400, "use a-z, 0-9 and -");
-        const copied = try deploy.duplicateEnvironment(c.store, name, body.from, body.name);
+        const copied = try deploy.duplicateEnvironment(c.store, c.vars, name, body.from, body.name);
         return c.res.json(201, .{ .name = body.name, .copied = copied });
+    }
+    if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "variables")) {
+        if (!(try c.store.loadProject(name)).hasEnvironment(seg[2])) return c.res.fail(404, "no such environment");
+        return variables(c, name, seg[2], null, seg[4..]);
+    }
+    if (seg.len == 5 and eql(seg[1], "environments") and eql(seg[3], "variables")) {
+        return variables(c, name, seg[2], null, seg[4..]);
     }
     if (seg.len == 3 and eql(seg[1], "environments") and method(c, "DELETE")) {
         const env = seg[2];
@@ -393,6 +404,7 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
             c.store.remove(c.store.idOf(svc));
             if (svc.container.len > 0) c.eng.remove(svc.container);
         }
+        c.vars.dropEnvironment(name, env);
         var p = try c.store.loadProject(name);
         var kept: std.ArrayList([]const u8) = .empty;
         for (p.environments) |e| {
@@ -428,10 +440,7 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
         for (v) |d| if (!store_mod.validDomain(d)) return error.BadDomain;
         svc.domains = v;
     }
-    if (in.env) |v| {
-        for (v) |e| if (std.mem.indexOfScalar(u8, e, '=') == null) return error.BadEnv;
-        svc.env = v;
-    }
+
     if (in.health_path) |v| {
         if (v.len > 0 and v[0] != '/') return error.BadHealthPath;
         svc.health_path = v;
@@ -487,6 +496,10 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
             if (c.store.exists(c.store.idOf(svc))) return c.res.fail(409, "a service with this name exists");
             try c.store.ensureEnvironment(project, env);
             try c.store.save(svc);
+            if (in.env) |list| {
+                const parsed = parseEntries(c.a, list) catch return c.res.fail(400, "env entries are KEY=VALUE");
+                c.vars.put(project, env, name, parsed) catch return c.res.fail(400, "invalid variable name");
+            }
         }
         if (in.deploy and svc.image.len > 0) startDeploy(c, c.store.idOf(svc), "api");
         return c.res.json(201, try serviceView(c, svc));
@@ -515,6 +528,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         if (method(c, "DELETE")) {
             const lock = try c.store.lock();
             defer c.store.unlock(lock);
+            c.vars.dropService(svc.project, svc.environment, svc.name);
             c.store.remove(id);
             c.store.syncRoutes();
             if (svc.container.len > 0) c.eng.remove(svc.container);
@@ -523,6 +537,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         return c.res.fail(405, "method not allowed");
     }
     const what = seg[1];
+    if (eql(what, "variables")) return variables(c, svc.project, svc.environment, svc.name, seg[2..]);
     if (eql(what, "deploy") and method(c, "POST")) {
         if (svc.image.len == 0) return c.res.fail(400, "set an image first");
         startDeploy(c, id, "api");
@@ -554,6 +569,49 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         return c.res.send(200, "application/x-ndjson", lastLines(data, n));
     }
     c.res.fail(404, "not found");
+}
+
+fn parseEntries(a: Allocator, list: []const []const u8) ![]vars_mod.Var {
+    const out = try a.alloc(vars_mod.Var, list.len);
+    for (list, 0..) |e, i| {
+        const eq = std.mem.indexOfScalar(u8, e, '=') orelse return error.BadEnv;
+        out[i] = .{ .name = e[0..eq], .value = e[eq + 1 ..] };
+    }
+    return out;
+}
+
+/// The variables of a service, or of an environment with `service` null.
+fn variables(c: *Ctx, project: []const u8, env: []const u8, service: ?[]const u8, seg: []const []const u8) !void {
+    if (seg.len == 0 and method(c, "GET")) {
+        if (c.req.param("resolved") != null) {
+            const name = service orelse return c.res.fail(400, "only a service's variables resolve");
+            var warnings: std.ArrayList([]const u8) = .empty;
+            const svc = try c.store.load(c.store.idFrom(project, env, name));
+            const list = c.vars.resolve(svc, &warnings) catch |e| return c.res.fail(400, @errorName(e));
+            return c.res.json(200, .{ .variables = list, .warnings = warnings.items });
+        }
+        return c.res.json(200, try c.vars.get(project, env, service));
+    }
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    const current = try c.vars.get(project, env, service);
+    var next: []vars_mod.Var = undefined;
+    if (seg.len == 0 and method(c, "PUT")) {
+        const body = c.req.json(struct { variables: []const vars_mod.Var }) catch return c.res.fail(400, "send variables");
+        next = try vars_mod.merge(c.a, &.{}, body.variables, &.{});
+    } else if (seg.len == 0 and method(c, "PATCH")) {
+        const body = c.req.json(struct { set: []const vars_mod.Var = &.{}, unset: []const []const u8 = &.{} }) catch return c.res.fail(400, "send set and unset");
+        next = try vars_mod.merge(c.a, current, body.set, body.unset);
+    } else if (seg.len == 1 and eql(seg[0], "raw") and method(c, "POST")) {
+        // A pasted .env file, as text inside JSON.
+        const body = c.req.json(struct { text: []const u8, replace: bool = false }) catch return c.res.fail(400, "send text");
+        const parsed = vars_mod.parseDotenv(c.a, body.text) catch |e| return c.res.fail(400, @errorName(e));
+        next = try vars_mod.merge(c.a, if (body.replace) &.{} else current, parsed, &.{});
+    } else {
+        return c.res.fail(405, "method not allowed");
+    }
+    c.vars.put(project, env, service, next) catch |e| return c.res.fail(400, if (e == error.BadKey) "names use A-Z, 0-9 and _, and do not start with a digit" else @errorName(e));
+    c.res.json(200, next);
 }
 
 fn lastLines(text: []const u8, n: usize) []const u8 {
