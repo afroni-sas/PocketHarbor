@@ -140,7 +140,7 @@ const Conn = struct {
     path: Text(256) = .{},
     host: Text(256) = .{},
     client_ip: Text(46) = .{},
-    service: Text(40) = .{},
+    service: Text(128) = .{},
 };
 
 const LogFile = struct { fd: i32, size: u64 };

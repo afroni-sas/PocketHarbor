@@ -28,6 +28,7 @@ const usage =
     \\
     \\Services
     \\  deploy NAME [options]              Deploy a new version without downtime
+    \\      --project NAME, --env NAME     Where it belongs (default: default, production)
     \\      --image IMAGE                  Image to run
     \\      --port N                       Port the app listens on (default: detect)
     \\      --domain NAME                  Hostname to answer for (repeatable)
@@ -35,10 +36,20 @@ const usage =
     \\      --health PATH                  HTTP path that must answer 2xx or 3xx
     \\      --sleep-after TIME             Stop after this long idle, e.g. 10m; 0 is never
     \\      --timeout SEC                  Time allowed to become healthy (default 180)
-    \\  ls                                 List services
+    \\  ls [--project P] [--env E]         List services
     \\  rm NAME                            Remove a service
     \\  logs NAME [-f] [--tail N]          Application output
     \\  logs --http NAME [-f] [--tail N]   HTTP requests, as JSON lines
+    \\  deployments NAME                   Deployment history
+    \\  logs --deploy N NAME               The log of one deployment
+    \\
+    \\Projects
+    \\  project ls | create NAME | rm NAME
+    \\  env ls [--project P]
+    \\  env create NAME [--project P] [--from ENV]   Copies the services of ENV
+    \\  env rm NAME [--project P]
+    \\
+    \\Commands that name a service also take --project and --env.
     \\
     \\Domains
     \\  domain add NAME HOSTNAME           Answer for a hostname (*.example.com works)
@@ -117,6 +128,9 @@ pub fn main(init: std.process.Init) !void {
         .{ "rm", cmdRm },
         .{ "logs", cmdLogs },
         .{ "domain", cmdDomain },
+        .{ "deployments", cmdDeployments },
+        .{ "project", cmdProject },
+        .{ "env", cmdEnv },
         .{ "tunnel", cmdTunnel },
         .{ "_wake", cmdWake },
         .{ "_sleep", cmdSleep },
@@ -156,6 +170,35 @@ fn parseDuration(s: []const u8) !u32 {
     };
     return (try std.fmt.parseInt(u32, s[0 .. s.len - 1], 10)) * unit;
 }
+
+const Scope = struct {
+    project: []const u8 = store_mod.default_project,
+    environment: []const u8 = store_mod.default_environment,
+
+    /// Handles --project and --env, wherever they appear.
+    fn take(self: *Scope, args: []const [:0]const u8, i: *usize) bool {
+        const o: []const u8 = args[i.*];
+        if (eql(o, "--project")) {
+            self.project = value(args, i);
+            checkName(self.project);
+            return true;
+        }
+        if (eql(o, "--env")) {
+            self.environment = value(args, i);
+            checkName(self.environment);
+            return true;
+        }
+        return false;
+    }
+
+    fn id(self: Scope, c: *Ctx, name: []const u8) []const u8 {
+        return c.store.idFrom(self.project, self.environment, name);
+    }
+
+    fn load(self: Scope, c: *Ctx, name: []const u8) store_mod.Service {
+        return c.store.load(self.id(c, name)) catch die("no service named {s} in {s}/{s}", .{ name, self.project, self.environment });
+    }
+};
 
 fn checkName(name: []const u8) void {
     if (!store_mod.validName(name)) die("invalid service name \"{s}\": use a-z, 0-9 and -", .{name});
@@ -276,13 +319,17 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
 
 fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     var opts: deploy.Options = .{};
+    var run_opts: deploy.RunOptions = .{};
+    var scope: Scope = .{};
     var name: ?[]const u8 = null;
     var domains: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const o: []const u8 = args[i];
-        if (eql(o, "--image")) {
+        if (scope.take(args, &i)) {
+            continue;
+        } else if (eql(o, "--image")) {
             opts.image = value(args, &i);
         } else if (eql(o, "--port")) {
             opts.port = std.fmt.parseInt(u16, value(args, &i), 10) catch die("invalid port", .{});
@@ -290,7 +337,7 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
             const d = value(args, &i);
             checkDomain(d);
             try domains.append(c.a, d);
-        } else if (eql(o, "-e") or eql(o, "--env")) {
+        } else if (eql(o, "-e") or eql(o, "--env-var")) {
             const e = value(args, &i);
             if (std.mem.indexOfScalar(u8, e, '=') == null) die("-e needs KEY=VALUE", .{});
             try env.append(c.a, e);
@@ -300,7 +347,7 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
         } else if (eql(o, "--sleep-after")) {
             opts.sleep_after_s = parseDuration(value(args, &i)) catch die("invalid duration", .{});
         } else if (eql(o, "--timeout")) {
-            opts.timeout_s = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid timeout", .{});
+            run_opts.timeout_s = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid timeout", .{});
         } else if (o.len > 0 and o[0] == '-') {
             die("unknown option \"{s}\" for deploy", .{o});
         } else if (name == null) {
@@ -311,20 +358,36 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     }
     const n = name orelse die("usage: pharbor deploy NAME --image IMAGE", .{});
     checkName(n);
+    opts.project = scope.project;
+    opts.environment = scope.environment;
     opts.domains = domains.items;
     opts.env = env.items;
-    try deploy.deploy(c.store, c.eng, n, opts);
+    const svc = try deploy.configure(c.store, n, opts);
+    try deploy.run(c.store, c.eng, c.store.idOf(svc), run_opts);
 }
 
-fn cmdLs(c: *Ctx, _: []const [:0]const u8) !void {
-    sys.print("{s: <18}{s: <34}{s: <12}{s: <8}{s}\n", .{ "NAME", "IMAGE", "STATUS", "PORT", "HOSTNAMES" });
+fn cmdLs(c: *Ctx, args: []const [:0]const u8) !void {
+    var scope: Scope = .{};
+    var filtered = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) die("unknown option \"{s}\" for ls", .{args[i]});
+        filtered = true;
+    }
+    sys.print("{s: <28}{s: <18}{s: <30}{s: <12}{s: <7}{s}\n", .{ "NAME", "ENV", "IMAGE", "STATUS", "PORT", "HOSTNAMES" });
     const s = c.store.settings();
     for (try c.store.list()) |svc| {
+        if (filtered and (!eql(svc.project, scope.project) or !eql(svc.environment, scope.environment))) continue;
         const info = if (svc.container.len > 0) c.eng.inspect(svc.container) else null;
-        const status: []const u8 = if (svc.asleep) "asleep" else if (info) |i| i.status else "missing";
+        const status: []const u8 = if (svc.asleep) "asleep" else if (info) |d| d.status else "not deployed";
         const names = try c.store.hostnames(svc, s);
-        sys.print("{s: <18}{s: <34}{s: <12}{d: <8}{s}\n", .{
-            svc.name,
+        const shown = if (eql(svc.project, store_mod.default_project))
+            svc.name
+        else
+            try std.fmt.allocPrint(c.a, "{s}/{s}", .{ svc.project, svc.name });
+        sys.print("{s: <28}{s: <18}{s: <30}{s: <12}{d: <7}{s}\n", .{
+            shown,
+            svc.environment,
             svc.image,
             status,
             svc.port,
@@ -334,14 +397,109 @@ fn cmdLs(c: *Ctx, _: []const [:0]const u8) !void {
 }
 
 fn cmdRm(c: *Ctx, args: []const [:0]const u8) !void {
-    if (args.len != 1) die("usage: pharbor rm NAME", .{});
-    const svc = c.store.load(args[0]) catch die("no service named {s}", .{args[0]});
+    var scope: Scope = .{};
+    var name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) name = args[i];
+    }
+    const n = name orelse die("usage: pharbor rm NAME", .{});
+    const svc = scope.load(c, n);
     const lock = try c.store.lock();
     defer c.store.unlock(lock);
-    c.store.remove(svc.name);
+    c.store.remove(c.store.idOf(svc));
     c.store.syncRoutes();
     if (svc.container.len > 0) c.eng.remove(svc.container);
     sys.print("Removed {s}\n", .{svc.name});
+}
+
+fn cmdDeployments(c: *Ctx, args: []const [:0]const u8) !void {
+    var scope: Scope = .{};
+    var name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) name = args[i];
+    }
+    const n = name orelse die("usage: pharbor deployments NAME", .{});
+    const svc = scope.load(c, n);
+    sys.print("{s: <6}{s: <11}{s: <10}{s: <34}{s}\n", .{ "#", "STATUS", "TRIGGER", "IMAGE", "REASON" });
+    for (try c.store.listDeployments(c.store.idOf(svc))) |d| {
+        sys.print("{d: <6}{s: <11}{s: <10}{s: <34}{s}\n", .{ d.number, d.status, d.trigger, d.image, d.reason });
+    }
+}
+
+fn cmdProject(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 0) die("usage: pharbor project ls|create NAME|rm NAME", .{});
+    const verb: []const u8 = args[0];
+    if (eql(verb, "ls")) {
+        for (try c.store.listProjects()) |p| sys.print("{s: <30}{s}\n", .{ p.name, try std.mem.join(c.a, " ", p.environments) });
+        return;
+    }
+    if (args.len != 2) die("usage: pharbor project ls|create NAME|rm NAME", .{});
+    const name: []const u8 = args[1];
+    checkName(name);
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    if (eql(verb, "create")) {
+        if (c.store.projectExists(name)) die("project {s} already exists", .{name});
+        try c.store.ensureEnvironment(name, store_mod.default_environment);
+    } else if (eql(verb, "rm")) {
+        if (!c.store.projectExists(name)) die("no project named {s}", .{name});
+        for (try c.store.list()) |svc| {
+            if (!eql(svc.project, name)) continue;
+            c.store.remove(c.store.idOf(svc));
+            if (svc.container.len > 0) c.eng.remove(svc.container);
+        }
+        c.store.removeProject(name);
+        c.store.syncRoutes();
+    } else {
+        die("usage: pharbor project ls|create NAME|rm NAME", .{});
+    }
+}
+
+fn cmdEnv(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 0) die("usage: pharbor env ls|create NAME|rm NAME", .{});
+    const verb: []const u8 = args[0];
+    var scope: Scope = .{};
+    var from: []const u8 = store_mod.default_environment;
+    var name: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (eql(args[i], "--from")) {
+            from = value(args, &i);
+        } else if (!scope.take(args, &i)) {
+            name = args[i];
+        }
+    }
+    if (eql(verb, "ls")) {
+        const p = c.store.loadProject(scope.project) catch die("no project named {s}", .{scope.project});
+        for (p.environments) |e| sys.print("{s}\n", .{e});
+        return;
+    }
+    const n = name orelse die("usage: pharbor env create|rm NAME", .{});
+    checkName(n);
+    if (eql(verb, "create")) {
+        const copied = try deploy.duplicateEnvironment(c.store, scope.project, from, n);
+        sys.print("Created {s} with {d} services from {s}\n", .{ n, copied, from });
+    } else if (eql(verb, "rm")) {
+        if (eql(n, store_mod.default_environment)) die("the production environment cannot be removed", .{});
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        for (try c.store.listIn(scope.project, n)) |svc| {
+            c.store.remove(c.store.idOf(svc));
+            if (svc.container.len > 0) c.eng.remove(svc.container);
+        }
+        var p = try c.store.loadProject(scope.project);
+        var kept: std.ArrayList([]const u8) = .empty;
+        for (p.environments) |e| {
+            if (!eql(e, n)) try kept.append(c.a, e);
+        }
+        p.environments = kept.items;
+        try c.store.saveProject(p);
+        c.store.syncRoutes();
+    } else {
+        die("usage: pharbor env ls|create NAME|rm NAME", .{});
+    }
 }
 
 fn printTail(data: []const u8, n: usize) void {
@@ -363,16 +521,22 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
     var http_log = false;
     var follow = false;
     var tail: ?usize = null;
+    var deployment: ?u32 = null;
     var name: ?[]const u8 = null;
+    var scope: Scope = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const o: []const u8 = args[i];
-        if (eql(o, "--http")) {
+        if (scope.take(args, &i)) {
+            continue;
+        } else if (eql(o, "--http")) {
             http_log = true;
         } else if (eql(o, "-f") or eql(o, "--follow")) {
             follow = true;
         } else if (eql(o, "--tail")) {
             tail = std.fmt.parseInt(usize, value(args, &i), 10) catch die("invalid --tail", .{});
+        } else if (eql(o, "--deploy")) {
+            deployment = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid --deploy", .{});
         } else if (name == null) {
             name = o;
         } else {
@@ -380,8 +544,14 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
         }
     }
     const n = name orelse die("usage: pharbor logs [--http] NAME", .{});
-    const svc = c.store.load(n) catch die("no service named {s}", .{n});
+    const svc = scope.load(c, n);
+    const id = c.store.idOf(svc);
 
+    if (deployment) |number| {
+        const data = sys.readFileAlloc(c.a, c.store.deploymentLog(id, number), 1 << 26) catch die("no such deployment", .{});
+        sys.print("{s}", .{data});
+        return;
+    }
     if (!http_log) {
         var a: std.ArrayList([]const u8) = .empty;
         try a.append(c.a, "logs");
@@ -391,7 +561,7 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
         linux.exit_group(try c.eng.run(a.items));
     }
 
-    var p = try sys.Path.of(c.store.path(try std.fmt.allocPrint(c.a, "http/{s}.log", .{n})));
+    var p = try sys.Path.of(c.store.path(try std.fmt.allocPrint(c.a, "http/{s}.log", .{id})));
     const data = sys.readFileAlloc(c.a, p.slice(), 1 << 30) catch "";
     printTail(data, tail orelse 100);
     if (!follow) return;
@@ -444,12 +614,18 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
         c.store.syncRoutes();
         return;
     }
-    if (args.len != 3) die("usage: pharbor domain add|rm NAME HOSTNAME", .{});
-    const host: []const u8 = args[2];
+    var scope: Scope = .{};
+    var positional: std.ArrayList([]const u8) = .empty;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) try positional.append(c.a, args[i]);
+    }
+    if (positional.items.len != 2) die("usage: pharbor domain add|rm NAME HOSTNAME", .{});
+    const host: []const u8 = positional.items[1];
     checkDomain(host);
     const lock = try c.store.lock();
     defer c.store.unlock(lock);
-    var svc = c.store.load(args[1]) catch die("no service named {s}", .{args[1]});
+    var svc = scope.load(c, positional.items[0]);
     var out: std.ArrayList([]const u8) = .empty;
     var present = false;
     for (svc.domains) |d| {
@@ -480,7 +656,16 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
 fn cmdTunnel(c: *Ctx, args: []const [:0]const u8) !void {
     if (args.len == 0) die("usage: pharbor tunnel quick NAME|start TOKEN|status|stop", .{});
     const verb: []const u8 = args[0];
-    if (eql(verb, "quick") and args.len == 2) return tunnel.quick(c.store, c.eng, args[1]);
+    if (eql(verb, "quick") and args.len >= 2) {
+        var scope: Scope = .{};
+        var name: ?[]const u8 = null;
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (!scope.take(args, &i)) name = args[i];
+        }
+        const svc = scope.load(c, name orelse die("usage: pharbor tunnel quick NAME", .{}));
+        return tunnel.quick(c.store, c.eng, c.store.idOf(svc));
+    }
     if (eql(verb, "start") and args.len == 2) return tunnel.named(c.store, c.eng, args[1]);
     if (eql(verb, "status")) return tunnel.status(c.eng);
     if (eql(verb, "stop")) return tunnel.stop(c.store, c.eng);

@@ -1,10 +1,12 @@
 //! What PocketHarbor remembers, under one data directory:
 //!
-//!   <root>/services/<name>.json   one service and its current deployment
+//!   <root>/projects/<name>.json   a project and its environments
+//!   <root>/services/<id>.json     one service and its current deployment
+//!   <root>/deployments/<id>/      every attempt: <n>.json and <n>.log
 //!   <root>/settings.json          base domain, catch-all service, proxy port
 //!   <root>/routes.json            generated: what the proxy serves
 //!   <root>/proxy.pid              lets a change reach the running proxy
-//!   <root>/http/<name>.log        HTTP access log of a service
+//!   <root>/http/<id>.log          HTTP access log of a service
 
 const std = @import("std");
 const sys = @import("sys.zig");
@@ -12,7 +14,18 @@ const routes = @import("routes.zig");
 const linux = sys.linux;
 const Allocator = std.mem.Allocator;
 
+pub const Volume = struct { name: []const u8, mount: []const u8 };
+
+pub const Project = struct {
+    name: []const u8,
+    environments: []const []const u8 = &.{"production"},
+    created_at: i64 = 0,
+};
+
+/// One service in one environment of a project.
 pub const Service = struct {
+    project: []const u8 = default_project,
+    environment: []const u8 = default_environment,
     name: []const u8,
     image: []const u8 = "",
     /// The port the app listens on inside its container; 0 means detect it.
@@ -22,6 +35,10 @@ pub const Service = struct {
     /// Empty: a deployment is healthy as soon as its port accepts connections.
     health_path: []const u8 = "",
     sleep_after_s: u32 = 0,
+    volumes: []const Volume = &.{},
+    /// Where its card sits on the canvas.
+    x: i32 = 0,
+    y: i32 = 0,
     /// The container currently serving traffic.
     container: []const u8 = "",
     host_port: u16 = 0,
@@ -29,6 +46,23 @@ pub const Service = struct {
     deployment: u32 = 0,
     deployed_at: i64 = 0,
 };
+
+/// One attempt to ship a version of a service.
+pub const Deployment = struct {
+    number: u32,
+    /// "deploying", "active", "failed" or "removed".
+    status: []const u8 = "deploying",
+    image: []const u8 = "",
+    /// What asked for it: "cli", "api", "webhook" or "rollback".
+    trigger: []const u8 = "cli",
+    container: []const u8 = "",
+    reason: []const u8 = "",
+    created_at: i64 = 0,
+    finished_at: i64 = 0,
+};
+
+pub const default_project = "default";
+pub const default_environment = "production";
 
 pub const Settings = struct {
     /// With it, every service also answers at `<name>.<base_domain>`.
@@ -68,7 +102,7 @@ pub const Store = struct {
 
     pub fn init(a: Allocator, root: []const u8) !Store {
         const self: Store = .{ .a = a, .root = root };
-        for ([_][]const u8{ "services", "http" }) |d| try sys.mkdirP(self.path(d), 0o700);
+        for ([_][]const u8{ "services", "projects", "deployments", "http" }) |d| try sys.mkdirP(self.path(d), 0o700);
         return self;
     }
 
@@ -76,8 +110,21 @@ pub const Store = struct {
         return std.fmt.allocPrint(self.a, "{s}/{s}", .{ self.root, rel }) catch @panic("OOM");
     }
 
-    fn servicePath(self: Store, name: []const u8) []const u8 {
-        return std.fmt.allocPrint(self.a, "{s}/services/{s}.json", .{ self.root, name }) catch @panic("OOM");
+    /// `project.environment.name`: unique, and safe in a file name.
+    pub fn idOf(self: Store, svc: Service) []const u8 {
+        return self.idFrom(svc.project, svc.environment, svc.name);
+    }
+
+    pub fn idFrom(self: Store, project: []const u8, environment: []const u8, name: []const u8) []const u8 {
+        return std.fmt.allocPrint(self.a, "{s}.{s}.{s}", .{ project, environment, name }) catch @panic("OOM");
+    }
+
+    fn servicePath(self: Store, id: []const u8) []const u8 {
+        return std.fmt.allocPrint(self.a, "{s}/services/{s}.json", .{ self.root, id }) catch @panic("OOM");
+    }
+
+    fn projectPath(self: Store, name: []const u8) []const u8 {
+        return std.fmt.allocPrint(self.a, "{s}/projects/{s}.json", .{ self.root, name }) catch @panic("OOM");
     }
 
     /// Serialises changes to services. Released by `unlock` or at exit.
@@ -94,24 +141,134 @@ pub const Store = struct {
         sys.close(fd);
     }
 
-    pub fn exists(self: Store, name: []const u8) bool {
-        var p = sys.Path.of(self.servicePath(name)) catch return false;
+    pub fn exists(self: Store, id: []const u8) bool {
+        var p = sys.Path.of(self.servicePath(id)) catch return false;
         return sys.exists(p.z());
     }
 
-    pub fn load(self: Store, name: []const u8) !Service {
-        const data = try sys.readFileAlloc(self.a, self.servicePath(name), 1 << 20);
+    pub fn load(self: Store, id: []const u8) !Service {
+        const data = try sys.readFileAlloc(self.a, self.servicePath(id), 1 << 20);
         return std.json.parseFromSliceLeaky(Service, self.a, data, .{ .ignore_unknown_fields = true });
     }
 
     pub fn save(self: Store, svc: Service) !void {
         const data = try std.json.Stringify.valueAlloc(self.a, svc, .{ .whitespace = .indent_2 });
-        try sys.writeFileAtomic(self.servicePath(svc.name), data, 0o600);
+        try sys.writeFileAtomic(self.servicePath(self.idOf(svc)), data, 0o600);
     }
 
-    pub fn remove(self: Store, name: []const u8) void {
-        var p = sys.Path.of(self.servicePath(name)) catch return;
+    pub fn remove(self: Store, id: []const u8) void {
+        var p = sys.Path.of(self.servicePath(id)) catch return;
         sys.unlink(p.z()) catch {};
+        sys.rmrf(self.deploymentDir(id)) catch {};
+    }
+
+    pub fn listIn(self: Store, project: []const u8, environment: []const u8) ![]Service {
+        var out: std.ArrayList(Service) = .empty;
+        for (try self.list()) |svc| {
+            if (std.mem.eql(u8, svc.project, project) and std.mem.eql(u8, svc.environment, environment)) {
+                try out.append(self.a, svc);
+            }
+        }
+        return out.items;
+    }
+
+    pub fn projectExists(self: Store, name: []const u8) bool {
+        var p = sys.Path.of(self.projectPath(name)) catch return false;
+        return sys.exists(p.z());
+    }
+
+    pub fn loadProject(self: Store, name: []const u8) !Project {
+        const data = try sys.readFileAlloc(self.a, self.projectPath(name), 1 << 20);
+        return std.json.parseFromSliceLeaky(Project, self.a, data, .{ .ignore_unknown_fields = true });
+    }
+
+    pub fn saveProject(self: Store, p: Project) !void {
+        const data = try std.json.Stringify.valueAlloc(self.a, p, .{ .whitespace = .indent_2 });
+        try sys.writeFileAtomic(self.projectPath(p.name), data, 0o600);
+    }
+
+    pub fn removeProject(self: Store, name: []const u8) void {
+        var p = sys.Path.of(self.projectPath(name)) catch return;
+        sys.unlink(p.z()) catch {};
+    }
+
+    pub fn listProjects(self: Store) ![]Project {
+        var out: std.ArrayList(Project) = .empty;
+        var d = try sys.Path.of(self.path("projects"));
+        var it = try sys.DirIter.open_(d.z());
+        defer it.deinit();
+        while (try it.next()) |ent| {
+            if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+            const name = try self.a.dupe(u8, ent.name[0 .. ent.name.len - 5]);
+            try out.append(self.a, self.loadProject(name) catch continue);
+        }
+        std.mem.sort(Project, out.items, {}, struct {
+            fn lt(_: void, x: Project, y: Project) bool {
+                return std.mem.lessThan(u8, x.name, y.name);
+            }
+        }.lt);
+        return out.items;
+    }
+
+    /// Creates a project or environment the first time it is used.
+    pub fn ensureEnvironment(self: Store, project: []const u8, environment: []const u8) !void {
+        if (!self.projectExists(project)) {
+            try self.saveProject(.{
+                .name = project,
+                .environments = &.{environment},
+                .created_at = @intCast(@divFloor(sys.nowNs(), std.time.ns_per_s)),
+            });
+            return;
+        }
+        var p = try self.loadProject(project);
+        for (p.environments) |e| {
+            if (std.mem.eql(u8, e, environment)) return;
+        }
+        var envs: std.ArrayList([]const u8) = .empty;
+        try envs.appendSlice(self.a, p.environments);
+        try envs.append(self.a, environment);
+        p.environments = envs.items;
+        try self.saveProject(p);
+    }
+
+    pub fn deploymentDir(self: Store, id: []const u8) []const u8 {
+        return std.fmt.allocPrint(self.a, "{s}/deployments/{s}", .{ self.root, id }) catch @panic("OOM");
+    }
+
+    pub fn deploymentLog(self: Store, id: []const u8, number: u32) []const u8 {
+        return std.fmt.allocPrint(self.a, "{s}/{d}.log", .{ self.deploymentDir(id), number }) catch @panic("OOM");
+    }
+
+    pub fn saveDeployment(self: Store, id: []const u8, d: Deployment) !void {
+        try sys.mkdirP(self.deploymentDir(id), 0o700);
+        const data = try std.json.Stringify.valueAlloc(self.a, d, .{ .whitespace = .indent_2 });
+        const file = try std.fmt.allocPrint(self.a, "{s}/{d}.json", .{ self.deploymentDir(id), d.number });
+        try sys.writeFileAtomic(file, data, 0o600);
+    }
+
+    pub fn loadDeployment(self: Store, id: []const u8, number: u32) !Deployment {
+        const file = try std.fmt.allocPrint(self.a, "{s}/{d}.json", .{ self.deploymentDir(id), number });
+        const data = try sys.readFileAlloc(self.a, file, 1 << 20);
+        return std.json.parseFromSliceLeaky(Deployment, self.a, data, .{ .ignore_unknown_fields = true });
+    }
+
+    /// Newest first.
+    pub fn listDeployments(self: Store, id: []const u8) ![]Deployment {
+        var out: std.ArrayList(Deployment) = .empty;
+        var d = sys.Path.of(self.deploymentDir(id)) catch return out.items;
+        var it = sys.DirIter.open_(d.z()) catch return out.items;
+        defer it.deinit();
+        while (try it.next()) |ent| {
+            if (!std.mem.endsWith(u8, ent.name, ".json")) continue;
+            const n = std.fmt.parseInt(u32, ent.name[0 .. ent.name.len - 5], 10) catch continue;
+            try out.append(self.a, self.loadDeployment(id, n) catch continue);
+        }
+        std.mem.sort(Deployment, out.items, {}, struct {
+            fn lt(_: void, x: Deployment, y: Deployment) bool {
+                return x.number > y.number;
+            }
+        }.lt);
+        return out.items;
     }
 
     pub fn list(self: Store) ![]Service {
@@ -142,14 +299,29 @@ pub const Store = struct {
         try sys.writeFileAtomic(self.path("settings.json"), data, 0o600);
     }
 
+    /// What a service is called under the base domain. The default project
+    /// and production keep the short forms.
+    pub fn publicLabel(self: Store, svc: Service) []const u8 {
+        const in_default = std.mem.eql(u8, svc.project, default_project);
+        const in_production = std.mem.eql(u8, svc.environment, default_environment);
+        return (if (in_default and in_production)
+            self.a.dupe(u8, svc.name)
+        else if (in_default)
+            std.fmt.allocPrint(self.a, "{s}-{s}", .{ svc.name, svc.environment })
+        else if (in_production)
+            std.fmt.allocPrint(self.a, "{s}-{s}", .{ svc.project, svc.name })
+        else
+            std.fmt.allocPrint(self.a, "{s}-{s}-{s}", .{ svc.project, svc.name, svc.environment })) catch @panic("OOM");
+    }
+
     /// Every hostname a service answers for.
     pub fn hostnames(self: Store, svc: Service, s: Settings) ![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         try out.appendSlice(self.a, svc.domains);
         if (s.base_domain.len > 0) {
-            try out.append(self.a, try std.fmt.allocPrint(self.a, "{s}.{s}", .{ svc.name, s.base_domain }));
+            try out.append(self.a, try std.fmt.allocPrint(self.a, "{s}.{s}", .{ self.publicLabel(svc), s.base_domain }));
         }
-        if (std.mem.eql(u8, s.default_service, svc.name)) try out.append(self.a, "*");
+        if (std.mem.eql(u8, s.default_service, self.idOf(svc))) try out.append(self.a, "*");
         return out.items;
     }
 
@@ -165,7 +337,7 @@ pub const Store = struct {
             for (names) |host| {
                 out.append(self.a, .{
                     .host = host,
-                    .service = svc.name,
+                    .service = self.idOf(svc),
                     .port = svc.host_port,
                     .asleep = svc.asleep,
                     .sleep_after_s = svc.sleep_after_s,
@@ -195,6 +367,17 @@ pub const Store = struct {
 };
 
 const t = std.testing;
+
+test "the default project keeps short public names" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const store: Store = .{ .a = arena.allocator(), .root = "/x" };
+    try t.expectEqualStrings("web", store.publicLabel(.{ .name = "web" }));
+    try t.expectEqualStrings("web-staging", store.publicLabel(.{ .name = "web", .environment = "staging" }));
+    try t.expectEqualStrings("shop-web", store.publicLabel(.{ .name = "web", .project = "shop" }));
+    try t.expectEqualStrings("shop-web-staging", store.publicLabel(.{ .name = "web", .project = "shop", .environment = "staging" }));
+    try t.expectEqualStrings("shop.staging.web", store.idOf(.{ .name = "web", .project = "shop", .environment = "staging" }));
+}
 
 test "service names fit in a hostname" {
     try t.expect(validName("web"));
