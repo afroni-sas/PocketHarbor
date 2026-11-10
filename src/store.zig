@@ -52,6 +52,8 @@ pub const Service = struct {
     health_path: []const u8 = "",
     sleep_after_s: u32 = 0,
     volumes: []const Volume = &.{},
+    /// "daily", "weekly" or empty: when its volumes are backed up.
+    backup_schedule: []const u8 = "",
     /// Where its card sits on the canvas.
     x: i32 = 0,
     y: i32 = 0,

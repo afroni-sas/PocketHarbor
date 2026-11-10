@@ -11,6 +11,7 @@ const deploy = @import("deploy.zig");
 const store_mod = @import("store.zig");
 const vars_mod = @import("vars.zig");
 const github = @import("github.zig");
+const backup = @import("backup.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -307,6 +308,8 @@ const ServiceView = struct {
     build_command: []const u8,
     start_command: []const u8,
     pre_deploy: []const u8,
+    volumes: []const store_mod.Volume,
+    backup_schedule: []const u8,
     port: u16,
     domains: []const []const u8,
     hostnames: []const []const u8,
@@ -335,6 +338,8 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .build_command = svc.build_command,
         .start_command = svc.start_command,
         .pre_deploy = svc.pre_deploy,
+        .volumes = svc.volumes,
+        .backup_schedule = svc.backup_schedule,
         .port = svc.port,
         .domains = svc.domains,
         .hostnames = try c.store.hostnames(svc, c.store.settings()),
@@ -445,6 +450,8 @@ const ServiceInput = struct {
     build_command: ?[]const u8 = null,
     start_command: ?[]const u8 = null,
     pre_deploy: ?[]const u8 = null,
+    volumes: ?[]const store_mod.Volume = null,
+    backup_schedule: ?[]const u8 = null,
     port: ?u16 = null,
     domains: ?[]const []const u8 = null,
     env: ?[]const []const u8 = null,
@@ -473,6 +480,16 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
     if (in.build_command) |v| svc.build_command = v;
     if (in.start_command) |v| svc.start_command = v;
     if (in.pre_deploy) |v| svc.pre_deploy = v;
+    if (in.volumes) |list| {
+        for (list) |v| {
+            if (!backup.validMount(v.mount) or !store_mod.validName(v.name)) return error.BadVolume;
+        }
+        svc.volumes = list;
+    }
+    if (in.backup_schedule) |v| {
+        if (v.len > 0 and !std.mem.eql(u8, v, "daily") and !std.mem.eql(u8, v, "weekly")) return error.BadSchedule;
+        svc.backup_schedule = v;
+    }
     if (in.port) |v| svc.port = v;
     if (in.domains) |v| {
         for (v) |d| if (!store_mod.validDomain(d)) return error.BadDomain;
@@ -583,6 +600,38 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");
         startDeploy(c, id, "api");
         return c.res.json(202, .{ .ok = true });
+    }
+    if (eql(what, "volumes") and method(c, "GET")) {
+        const View = struct { name: []const u8, mount: []const u8, size: u64 };
+        var out: std.ArrayList(View) = .empty;
+        for (svc.volumes) |v| try out.append(c.a, .{ .name = v.name, .mount = v.mount, .size = backup.usage(backup.volumeDir(c.store, id, v.name)) });
+        return c.res.json(200, out.items);
+    }
+    if (eql(what, "backups")) {
+        if (seg.len == 2 and method(c, "GET")) {
+            var out: std.ArrayList(backup.Backup) = .empty;
+            for (svc.volumes) |v| try out.appendSlice(c.a, try backup.list(c.store, id, v.name));
+            return c.res.json(200, out.items);
+        }
+        if (seg.len == 2 and method(c, "POST")) {
+            const body = c.req.json(struct { volume: ?[]const u8 = null, live: bool = false }) catch return c.res.fail(400, "invalid request");
+            if (svc.volumes.len == 0) return c.res.fail(409, "this service has no volumes");
+            var made: std.ArrayList(backup.Backup) = .empty;
+            for (svc.volumes) |v| {
+                if (body.volume) |want| if (!eql(want, v.name)) continue;
+                try made.append(c.a, backup.create(c.store, &c.eng, svc, v.name, !body.live) catch |e| return c.res.fail(500, @errorName(e)));
+            }
+            return c.res.json(201, made.items);
+        }
+        if (seg.len == 5 and eql(seg[4], "restore") and method(c, "POST")) {
+            backup.restore(c.store, &c.eng, svc, seg[2], seg[3]) catch |e| return c.res.fail(if (e == error.NoSuchBackup) 404 else 500, @errorName(e));
+            return c.res.json(200, .{ .ok = true });
+        }
+        if (seg.len == 4 and method(c, "DELETE")) {
+            backup.remove(c.store, id, seg[2], seg[3]) catch return c.res.fail(404, "no such backup");
+            return c.res.json(200, .{ .ok = true });
+        }
+        return c.res.fail(404, "not found");
     }
     if ((eql(what, "rollback") or eql(what, "redeploy")) and method(c, "POST")) {
         const body = c.req.json(struct { number: ?u32 = null }) catch return c.res.fail(400, "send number");

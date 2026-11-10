@@ -11,6 +11,7 @@ const vars_mod = @import("vars.zig");
 const crypto = @import("crypto.zig");
 const github = @import("github.zig");
 const detect = @import("detect.zig");
+const backup = @import("backup.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Deployment = store_mod.Deployment;
@@ -28,6 +29,7 @@ pub const Options = struct {
     build_command: ?[]const u8 = null,
     start_command: ?[]const u8 = null,
     pre_deploy: ?[]const u8 = null,
+    volumes: []const []const u8 = &.{},
     port: ?u16 = null,
     domains: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -148,6 +150,15 @@ pub fn configure(store: Store, vars: vars_mod.Vars, name: []const u8, opts: Opti
     if (opts.build_command) |v| svc.build_command = v;
     if (opts.start_command) |v| svc.start_command = v;
     if (opts.pre_deploy) |v| svc.pre_deploy = v;
+    if (opts.volumes.len > 0) {
+        var vols: std.ArrayList(store_mod.Volume) = .empty;
+        try vols.appendSlice(a, svc.volumes);
+        outer: for (opts.volumes) |mount| {
+            for (vols.items) |v| if (std.mem.eql(u8, v.mount, mount)) continue :outer;
+            try vols.append(a, .{ .name = backup.nameFromMount(mount), .mount = mount });
+        }
+        svc.volumes = vols.items;
+    }
     if (opts.port) |p| svc.port = p;
     if (opts.health_path) |p| svc.health_path = p;
     if (opts.sleep_after_s) |s| svc.sleep_after_s = s;
@@ -299,6 +310,8 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "PORT={d}", .{if (svc.port != 0) svc.port else default_port}) });
     }
     for (env) |v| try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
+    const mounts = try volumeArgs(store, id, svc.*);
+    try args.appendSlice(a, mounts);
     if (start_override) try args.appendSlice(a, &.{ "--entrypoint", "sh" });
     try args.append(a, record.image);
     if (start_override) try args.appendSlice(a, &.{ "-c", svc.start_command });
@@ -309,10 +322,31 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         const pre_name = try std.fmt.allocPrint(a, "{s}-pre", .{container});
         eng.remove(pre_name);
         try pre.appendSlice(a, &.{ "run", "--rm", "--name", pre_name, "--hostname", store.publicLabel(svc.*) });
+        try pre.appendSlice(a, mounts);
         for (env) |v| try pre.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
         try pre.appendSlice(a, &.{ "--entrypoint", "sh", record.image, "-c", svc.pre_deploy });
         if (try eng.runTo(pre.items, log.fd) != 0) return error.PreDeployFailed;
     }
+
+    // Two versions must not write to one volume at once, so a service with
+    // volumes has a short gap between them, as on Railway.
+    var paused: []const u8 = "";
+    if (svc.volumes.len > 0) {
+        const current = try store.load(id);
+        if (current.container.len > 0) {
+            if (eng.inspect(current.container)) |info| {
+                if (info.alive()) {
+                    log.say("Stopping {s} first: it holds the volumes", .{current.container});
+                    eng.stop(current.container, 30);
+                    paused = current.container;
+                }
+            }
+        }
+    }
+    errdefer if (paused.len > 0) {
+        log.say("Starting {s} again", .{paused});
+        _ = eng.start(paused);
+    };
 
     log.say("Starting the container", .{});
     const started = try eng.output(args.items);
@@ -436,6 +470,7 @@ fn build(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *
 pub fn forget(store: Store, eng: *Engine, vars: vars_mod.Vars, svc: Service) void {
     const id = store.idOf(svc);
     if (svc.container.len > 0) eng.remove(svc.container);
+    backup.dropAll(store, id);
     if (store.listDeployments(id)) |all| {
         for (all) |d| {
             if (std.mem.startsWith(u8, d.image, "pharbor-")) _ = eng.output(&.{ "rmi", d.image }) catch {};
@@ -443,6 +478,16 @@ pub fn forget(store: Store, eng: *Engine, vars: vars_mod.Vars, svc: Service) voi
     } else |_| {}
     vars.dropService(svc.project, svc.environment, svc.name);
     store.remove(id);
+}
+
+fn volumeArgs(store: Store, id: []const u8, svc: Service) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (svc.volumes) |v| {
+        const dir = backup.volumeDir(store, id, v.name);
+        try sys.mkdirP(dir, 0o755);
+        try out.appendSlice(store.a, &.{ "-v", try std.fmt.allocPrint(store.a, "{s}:{s}", .{ dir, v.mount }) });
+    }
+    return out.items;
 }
 
 /// Built images are kept for the five latest deployments, for rollbacks.

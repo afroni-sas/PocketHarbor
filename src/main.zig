@@ -17,6 +17,7 @@ const auth_mod = @import("auth.zig");
 const vars_mod = @import("vars.zig");
 const dns = @import("dns.zig");
 const github = @import("github.zig");
+const backup = @import("backup.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
@@ -44,6 +45,7 @@ const usage =
     \\      --start-command CMD            Replaces what the image runs
     \\      --no-auto-deploy               Do not deploy on each push
     \\      --pre-deploy CMD               Runs in the new version before it takes traffic
+    \\      --volume /PATH                 Data that survives deployments (repeatable)
     \\      --port N                       Port the app listens on (default: detect)
     \\      --domain NAME                  Hostname to answer for (repeatable)
     \\      -e, --env KEY=VALUE            Environment variable (repeatable)
@@ -58,6 +60,13 @@ const usage =
     \\  redeploy NAME                      The current image again, with current variables
     \\  rollback NAME N                    Deployment N again: its image and its variables
     \\  logs --deploy N NAME               The log of one deployment
+    \\
+    \\Volumes and backups
+    \\  volume ls NAME                     Volumes and the space they use
+    \\  volume rm NAME VOLUME              Deletes the volume and its data
+    \\  backup create NAME [VOLUME] [--live]   --live does not stop the service
+    \\  backup ls NAME | restore NAME VOLUME ID | rm NAME VOLUME ID
+    \\  backup schedule NAME daily|weekly|off   Keeps the 7 latest
     \\
     \\Projects
     \\  project ls | create NAME | rm NAME
@@ -181,6 +190,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "var", cmdVar },
         .{ "github", cmdGithub },
         .{ "registry", cmdRegistry },
+        .{ "volume", cmdVolume },
+        .{ "backup", cmdBackup },
     };
     inline for (commands) |c| {
         if (eql(cmd, c[0])) {
@@ -432,6 +443,102 @@ fn cmdVar(c: *Ctx, args: []const [:0]const u8) !void {
     sys.print("Saved. Deploy for the change to take effect.\n", .{});
 }
 
+fn humanSize(a: Allocator, n: u64) []const u8 {
+    const f: f64 = @floatFromInt(n);
+    return (if (n >= 1 << 30)
+        std.fmt.allocPrint(a, "{d:.1} GB", .{f / (1 << 30)})
+    else if (n >= 1 << 20)
+        std.fmt.allocPrint(a, "{d:.1} MB", .{f / (1 << 20)})
+    else
+        std.fmt.allocPrint(a, "{d:.1} KB", .{f / 1024})) catch "";
+}
+
+fn cmdVolume(c: *Ctx, args: []const [:0]const u8) !void {
+    const usage_line = "usage: pharbor volume ls NAME | rm NAME VOLUME";
+    var scope: Scope = .{};
+    var positional: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) try positional.append(c.a, args[i]);
+    }
+    const p = positional.items;
+    if (p.len < 2) die(usage_line, .{});
+    var svc = scope.load(c, p[1]);
+    const id = c.store.idOf(svc);
+    if (eql(p[0], "ls")) {
+        for (svc.volumes) |v| {
+            sys.print("{s: <16}{s: <36}{s}\n", .{ v.name, v.mount, humanSize(c.a, backup.usage(backup.volumeDir(c.store, id, v.name))) });
+        }
+        return;
+    }
+    if (eql(p[0], "rm") and p.len == 3) {
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        svc = try c.store.load(id);
+        var kept: std.ArrayList(store_mod.Volume) = .empty;
+        var found = false;
+        for (svc.volumes) |v| {
+            if (eql(v.name, p[2])) found = true else try kept.append(c.a, v);
+        }
+        if (!found) die("{s} has no volume {s}", .{ svc.name, p[2] });
+        svc.volumes = kept.items;
+        try c.store.save(svc);
+        try sys.rmrf(backup.volumeDir(c.store, id, p[2]));
+        sys.print("Removed. Deploy for the container to stop using it.\n", .{});
+        return;
+    }
+    die(usage_line, .{});
+}
+
+fn cmdBackup(c: *Ctx, args: []const [:0]const u8) !void {
+    const usage_line = "usage: pharbor backup create NAME [VOLUME] [--live] | ls NAME | restore NAME VOLUME ID | rm NAME VOLUME ID | schedule NAME daily|weekly|off";
+    var scope: Scope = .{};
+    var live = false;
+    var positional: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (eql(args[i], "--live")) {
+            live = true;
+        } else if (!scope.take(args, &i)) {
+            try positional.append(c.a, args[i]);
+        }
+    }
+    const p = positional.items;
+    if (p.len < 2) die(usage_line, .{});
+    var svc = scope.load(c, p[1]);
+    const id = c.store.idOf(svc);
+    const verb = p[0];
+    if (eql(verb, "create")) {
+        if (svc.volumes.len == 0) die("{s} has no volumes", .{svc.name});
+        for (svc.volumes) |v| {
+            if (p.len == 3 and !eql(v.name, p[2])) continue;
+            const b = backup.create(c.store, c.eng, svc, v.name, !live) catch |e| die("backup of {s} failed: {s}", .{ v.name, @errorName(e) });
+            sys.print("{s} {s} {s}\n", .{ v.name, b.id, humanSize(c.a, b.size) });
+        }
+    } else if (eql(verb, "ls")) {
+        for (svc.volumes) |v| {
+            for (try backup.list(c.store, id, v.name)) |b| {
+                var ts: [40]u8 = undefined;
+                sys.print("{s: <16}{s: <14}{s: <26}{s}\n", .{ v.name, b.id, sys.fmtTime(&ts, @as(i128, b.created_at) * std.time.ns_per_s), humanSize(c.a, b.size) });
+            }
+        }
+    } else if (eql(verb, "restore") and p.len == 4) {
+        backup.restore(c.store, c.eng, svc, p[2], p[3]) catch |e| die("restore failed: {s}", .{@errorName(e)});
+        sys.print("Restored {s} from {s}\n", .{ p[2], p[3] });
+    } else if (eql(verb, "rm") and p.len == 4) {
+        backup.remove(c.store, id, p[2], p[3]) catch die("no such backup", .{});
+    } else if (eql(verb, "schedule") and p.len == 3) {
+        if (!eql(p[2], "daily") and !eql(p[2], "weekly") and !eql(p[2], "off")) die(usage_line, .{});
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        svc = try c.store.load(id);
+        svc.backup_schedule = if (eql(p[2], "off")) "" else p[2];
+        try c.store.save(svc);
+    } else {
+        die(usage_line, .{});
+    }
+}
+
 fn cmdRegistry(c: *Ctx, args: []const [:0]const u8) !void {
     const usage_line = "usage: pharbor registry login HOST -u USER | ls | logout HOST";
     if (args.len == 0) die(usage_line, .{});
@@ -630,6 +737,7 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     var name: ?[]const u8 = null;
     var domains: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([]const u8) = .empty;
+    var volumes: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const o: []const u8 = args[i];
@@ -648,6 +756,10 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
             opts.build_command = value(args, &i);
         } else if (eql(o, "--start-command")) {
             opts.start_command = value(args, &i);
+        } else if (eql(o, "--volume")) {
+            const m = value(args, &i);
+            if (!backup.validMount(m)) die("--volume takes an absolute path inside the container, like /data", .{});
+            try volumes.append(c.a, m);
         } else if (eql(o, "--pre-deploy")) {
             opts.pre_deploy = value(args, &i);
         } else if (eql(o, "--no-auto-deploy")) {
@@ -683,6 +795,7 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     opts.environment = scope.environment;
     opts.domains = domains.items;
     opts.env = env.items;
+    opts.volumes = volumes.items;
     const vars = try varsFor(c);
     const svc = try deploy.configure(c.store, vars, n, opts);
     try deploy.run(c.store, c.eng, vars, c.store.idOf(svc), run_opts);
