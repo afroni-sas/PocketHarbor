@@ -42,6 +42,8 @@ pub const Service = struct {
     auto_deploy: bool = true,
     build_command: []const u8 = "",
     start_command: []const u8 = "",
+    /// Runs in the new version before it takes traffic, for migrations.
+    pre_deploy: []const u8 = "",
     /// The port the app listens on inside its container; 0 means detect it.
     port: u16 = 0,
     domains: []const []const u8 = &.{},
@@ -67,7 +69,7 @@ pub const Deployment = struct {
     /// "deploying", "active", "failed" or "removed".
     status: []const u8 = "deploying",
     image: []const u8 = "",
-    /// What asked for it: "cli", "api", "webhook" or "rollback".
+    /// What asked for it: "cli", "api", "webhook", "redeploy" or "rollback".
     trigger: []const u8 = "cli",
     /// For a build from GitHub: the commit, shortened, and its title.
     commit: []const u8 = "",

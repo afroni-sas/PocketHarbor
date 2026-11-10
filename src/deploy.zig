@@ -27,6 +27,7 @@ pub const Options = struct {
     auto_deploy: ?bool = null,
     build_command: ?[]const u8 = null,
     start_command: ?[]const u8 = null,
+    pre_deploy: ?[]const u8 = null,
     port: ?u16 = null,
     domains: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -118,6 +119,9 @@ fn explain(e: anyerror) []const u8 {
         error.UnknownLanguage => "no Dockerfile, and the language was not recognised",
         error.BadRootDir => "the root directory is not in the repository",
         error.UnsafePath => "the archive tried to write outside its directory",
+        error.PreDeployFailed => "the pre-deploy command failed",
+        error.NoSuchDeployment => "there is no such deployment",
+        error.ImageGone => "the image of that deployment no longer exists",
         else => @errorName(e),
     };
 }
@@ -143,6 +147,7 @@ pub fn configure(store: Store, vars: vars_mod.Vars, name: []const u8, opts: Opti
     if (opts.auto_deploy) |v| svc.auto_deploy = v;
     if (opts.build_command) |v| svc.build_command = v;
     if (opts.start_command) |v| svc.start_command = v;
+    if (opts.pre_deploy) |v| svc.pre_deploy = v;
     if (opts.port) |p| svc.port = p;
     if (opts.health_path) |p| svc.health_path = p;
     if (opts.sleep_after_s) |s| svc.sleep_after_s = s;
@@ -191,6 +196,10 @@ pub const RunOptions = struct {
     io: std.Io,
     trigger: []const u8 = "cli",
     github_api: []const u8 = "",
+    /// Runs the image of this earlier deployment again instead of building.
+    from: ?u32 = null,
+    /// With `from`: also run it with the variables it had, as a rollback.
+    restore_env: bool = false,
     echo: bool = true,
     timeout_s: u32 = default_timeout_s,
 };
@@ -224,10 +233,21 @@ pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts
         .container = container,
         .created_at = nowS(),
     };
+    var source: ?Deployment = null;
+    if (opts.from) |n| {
+        source = store.loadDeployment(id, n) catch {
+            sys.eprint("error: {s} has no deployment {d}\n", .{ svc.name, n });
+            return error.NoSuchDeployment;
+        };
+        record.image = source.?.image;
+        record.commit = source.?.commit;
+        record.message = source.?.message;
+    }
     try store.saveDeployment(id, record);
     const log = try Log.open(store, id, number, opts.echo);
     defer sys.close(log.fd);
     log.say("Deployment {d} of {s}: {s}", .{ number, svc.name, record.image });
+    if (source) |s| log.say("{s} of deployment {d}", .{ if (opts.restore_env) "Rollback to the image and variables" else "Redeploy of the image", s.number });
 
     ship(store, eng, vars, id, &svc, &record, log, opts) catch |e| {
         log.say("Deployment failed: {s}", .{explain(e)});
@@ -246,14 +266,25 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
     eng.remove(container);
 
     var warnings: std.ArrayList([]const u8) = .empty;
-    const env = try vars.resolve(svc.*, &warnings);
+    const env = if (opts.from != null and opts.restore_env)
+        try loadSnapshot(store, vars, id, opts.from.?)
+    else
+        try vars.resolve(svc.*, &warnings);
     for (warnings.items) |w| log.say("warning: {s}", .{w});
     try saveSnapshot(store, vars, id, record.number, env);
 
     // A start command replaces what the image runs, unless the generated
     // Dockerfile already carries it.
     var start_override = svc.start_command.len > 0;
-    if (svc.repo.len > 0) {
+    if (opts.from != null) {
+        // An image built here may have been pruned; a pulled one comes back.
+        if (std.mem.startsWith(u8, record.image, "pharbor-")) {
+            const listed = try eng.output(&.{"images"});
+            const tag_start = std.mem.lastIndexOfScalar(u8, record.image, ':') orelse record.image.len;
+            if (std.mem.indexOf(u8, listed.text, record.image[0..tag_start]) == null) return error.ImageGone;
+        }
+        start_override = start_override and !std.mem.startsWith(u8, record.image, "pharbor-");
+    } else if (svc.repo.len > 0) {
         const built = try build(store, eng, vars, id, svc, record, log, opts, env);
         record.image = built.image;
         start_override = start_override and !built.generated;
@@ -271,6 +302,17 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
     if (start_override) try args.appendSlice(a, &.{ "--entrypoint", "sh" });
     try args.append(a, record.image);
     if (start_override) try args.appendSlice(a, &.{ "-c", svc.start_command });
+
+    if (svc.pre_deploy.len > 0) {
+        log.say("Running the pre-deploy command: {s}", .{svc.pre_deploy});
+        var pre: std.ArrayList([]const u8) = .empty;
+        const pre_name = try std.fmt.allocPrint(a, "{s}-pre", .{container});
+        eng.remove(pre_name);
+        try pre.appendSlice(a, &.{ "run", "--rm", "--name", pre_name, "--hostname", store.publicLabel(svc.*) });
+        for (env) |v| try pre.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
+        try pre.appendSlice(a, &.{ "--entrypoint", "sh", record.image, "-c", svc.pre_deploy });
+        if (try eng.runTo(pre.items, log.fd) != 0) return error.PreDeployFailed;
+    }
 
     log.say("Starting the container", .{});
     const started = try eng.output(args.items);
@@ -412,6 +454,13 @@ fn pruneImages(store: Store, eng: *Engine, id: []const u8) void {
         kept += 1;
         if (kept > 5) _ = eng.output(&.{ "rmi", d.image }) catch {};
     }
+}
+
+fn loadSnapshot(store: Store, vars: vars_mod.Vars, id: []const u8, number: u32) ![]vars_mod.Var {
+    const file = try std.fmt.allocPrint(store.a, "{s}/{d}.env", .{ store.deploymentDir(id), number });
+    const sealed = sys.readFileAlloc(store.a, file, 1 << 22) catch return error.NoSuchDeployment;
+    const json = try crypto.open(store.a, vars.key, sealed);
+    return std.json.parseFromSliceLeaky([]vars_mod.Var, store.a, json, .{});
 }
 
 /// What a deployment ran with, so that it can be run again exactly.
