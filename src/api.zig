@@ -167,6 +167,7 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "services")) return services(c, seg[1..]);
     if (eql(seg[0], "settings")) return settings(c);
     if (eql(seg[0], "github")) return githubSettings(c, seg[1..]);
+    if (eql(seg[0], "registries")) return registries(c, seg[1..]);
     c.res.fail(404, "not found");
 }
 
@@ -693,6 +694,24 @@ fn webhookSecret(c: *Ctx) ![]const u8 {
         try c.store.saveSettings(s);
     }
     return crypto.open(c.a, c.panel.key, s.webhook_secret);
+}
+
+/// Credentials for private image registries, kept by the engine.
+fn registries(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 0 and method(c, "GET")) return c.res.json(200, c.eng.registries());
+    if (seg.len == 0 and method(c, "POST")) {
+        const body = c.req.json(struct { host: []const u8, username: []const u8, password: []const u8 }) catch return c.res.fail(400, "send host, username and password");
+        if (body.host.len == 0 or std.mem.indexOfAny(u8, body.host, " /") != null) return c.res.fail(400, "the host is a name like ghcr.io");
+        const out = try c.eng.outputWithInput(&.{ "login", body.host, "-u", body.username, "--password-stdin" }, body.password);
+        if (out.code != 0) return c.res.fail(400, std.mem.trim(u8, out.text, "\n"));
+        return c.res.json(201, .{ .host = body.host });
+    }
+    if (seg.len == 1 and method(c, "DELETE")) {
+        const out = try c.eng.output(&.{ "logout", seg[0] });
+        if (out.code != 0) return c.res.fail(404, "not logged in to that registry");
+        return c.res.json(200, .{ .ok = true });
+    }
+    c.res.fail(404, "not found");
 }
 
 fn githubSettings(c: *Ctx, seg: []const []const u8) !void {
