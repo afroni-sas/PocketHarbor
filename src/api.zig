@@ -305,6 +305,7 @@ const ServiceView = struct {
     auto_deploy: bool,
     build_command: []const u8,
     start_command: []const u8,
+    pre_deploy: []const u8,
     port: u16,
     domains: []const []const u8,
     hostnames: []const []const u8,
@@ -332,6 +333,7 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .auto_deploy = svc.auto_deploy,
         .build_command = svc.build_command,
         .start_command = svc.start_command,
+        .pre_deploy = svc.pre_deploy,
         .port = svc.port,
         .domains = svc.domains,
         .hostnames = try c.store.hostnames(svc, c.store.settings()),
@@ -441,6 +443,7 @@ const ServiceInput = struct {
     auto_deploy: ?bool = null,
     build_command: ?[]const u8 = null,
     start_command: ?[]const u8 = null,
+    pre_deploy: ?[]const u8 = null,
     port: ?u16 = null,
     domains: ?[]const []const u8 = null,
     env: ?[]const []const u8 = null,
@@ -468,6 +471,7 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
     if (in.auto_deploy) |v| svc.auto_deploy = v;
     if (in.build_command) |v| svc.build_command = v;
     if (in.start_command) |v| svc.start_command = v;
+    if (in.pre_deploy) |v| svc.pre_deploy = v;
     if (in.port) |v| svc.port = v;
     if (in.domains) |v| {
         for (v) |d| if (!store_mod.validDomain(d)) return error.BadDomain;
@@ -485,9 +489,14 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
 
 /// Runs `pharbor _deploy` on its own: it outlives this request and the panel.
 fn startDeploy(c: *Ctx, id: []const u8, trigger: []const u8) void {
+    startDeployFrom(c, id, trigger, null);
+}
+
+fn startDeployFrom(c: *Ctx, id: []const u8, trigger: []const u8, from: ?u32) void {
     const id_z = c.a.dupeSentinel(u8, id, 0) catch return;
     const trig_z = c.a.dupeSentinel(u8, trigger, 0) catch return;
-    const argv = [_:null]?[*:0]const u8{ "pharbor", "_deploy", id_z.ptr, trig_z.ptr };
+    const from_z = if (from) |n| std.fmt.allocPrintSentinel(c.a, "{d}", .{n}, 0) catch return else null;
+    const argv = [_:null]?[*:0]const u8{ "pharbor", "_deploy", id_z.ptr, trig_z.ptr, if (from_z) |f| f.ptr else null };
     const pid = sys.fork() catch return;
     if (pid == 0) {
         _ = linux.setsid();
@@ -573,6 +582,22 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");
         startDeploy(c, id, "api");
         return c.res.json(202, .{ .ok = true });
+    }
+    if ((eql(what, "rollback") or eql(what, "redeploy")) and method(c, "POST")) {
+        const body = c.req.json(struct { number: ?u32 = null }) catch return c.res.fail(400, "send number");
+        var number = body.number;
+        if (number == null) {
+            for (try c.store.listDeployments(id)) |d| {
+                if (eql(d.status, "active")) {
+                    number = d.number;
+                    break;
+                }
+            }
+        }
+        const n = number orelse return c.res.fail(409, "nothing is deployed yet");
+        _ = c.store.loadDeployment(id, n) catch return c.res.fail(404, "no such deployment");
+        startDeployFrom(c, id, what, n);
+        return c.res.json(202, .{ .ok = true, .from = n });
     }
     if (eql(what, "restart") and method(c, "POST")) {
         if (svc.container.len == 0) return c.res.fail(409, "not deployed");

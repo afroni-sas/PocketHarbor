@@ -43,6 +43,7 @@ const usage =
     \\      --build-command CMD            Replaces the detected build step
     \\      --start-command CMD            Replaces what the image runs
     \\      --no-auto-deploy               Do not deploy on each push
+    \\      --pre-deploy CMD               Runs in the new version before it takes traffic
     \\      --port N                       Port the app listens on (default: detect)
     \\      --domain NAME                  Hostname to answer for (repeatable)
     \\      -e, --env KEY=VALUE            Environment variable (repeatable)
@@ -54,6 +55,8 @@ const usage =
     \\  logs NAME [-f] [--tail N]          Application output
     \\  logs --http NAME [-f] [--tail N]   HTTP requests, as JSON lines
     \\  deployments NAME                   Deployment history
+    \\  redeploy NAME                      The current image again, with current variables
+    \\  rollback NAME N                    Deployment N again: its image and its variables
     \\  logs --deploy N NAME               The log of one deployment
     \\
     \\Projects
@@ -160,6 +163,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "logs", cmdLogs },
         .{ "domain", cmdDomain },
         .{ "deployments", cmdDeployments },
+        .{ "redeploy", cmdRedeploy },
+        .{ "rollback", cmdRollback },
         .{ "project", cmdProject },
         .{ "env", cmdEnv },
         .{ "tunnel", cmdTunnel },
@@ -315,15 +320,56 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     try httpd.serve(.{ .ip = .{ 127, 0, 0, 1 }, .port = s.panel_port }, api.handle, panel);
 }
 
+/// `_deploy ID TRIGGER [N]`: run in the background for the panel.
 fn cmdDeployJob(c: *Ctx, args: []const [:0]const u8) !void {
-    if (args.len != 2) return;
-    deploy.run(c.store, c.eng, try varsFor(c), args[0], .{
-        .gpa = c.gpa,
-        .io = c.io,
-        .trigger = args[1],
-        .echo = false,
-        .github_api = c.env.get("PHARBOR_GITHUB_API") orelse "",
-    }) catch {};
+    if (args.len < 2) return;
+    var opts = runOptions(c, args[1]);
+    opts.echo = false;
+    if (args.len == 3) {
+        opts.from = std.fmt.parseInt(u32, args[2], 10) catch return;
+        opts.restore_env = eql(args[1], "rollback");
+    }
+    deploy.run(c.store, c.eng, try varsFor(c), args[0], opts) catch {};
+}
+
+fn runOptions(c: *Ctx, trigger: []const u8) deploy.RunOptions {
+    return .{ .gpa = c.gpa, .io = c.io, .trigger = trigger, .github_api = c.env.get("PHARBOR_GITHUB_API") orelse "" };
+}
+
+fn activeDeployment(c: *Ctx, id: []const u8) u32 {
+    for (c.store.listDeployments(id) catch &.{}) |d| {
+        if (eql(d.status, "active")) return d.number;
+    }
+    die("nothing is deployed yet", .{});
+}
+
+fn cmdRedeploy(c: *Ctx, args: []const [:0]const u8) !void {
+    var scope: Scope = .{};
+    var name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) name = args[i];
+    }
+    const svc = scope.load(c, name orelse die("usage: pharbor redeploy NAME", .{}));
+    const id = c.store.idOf(svc);
+    var opts = runOptions(c, "redeploy");
+    opts.from = activeDeployment(c, id);
+    try deploy.run(c.store, c.eng, try varsFor(c), id, opts);
+}
+
+fn cmdRollback(c: *Ctx, args: []const [:0]const u8) !void {
+    var scope: Scope = .{};
+    var positional: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) try positional.append(c.a, args[i]);
+    }
+    if (positional.items.len != 2) die("usage: pharbor rollback NAME N", .{});
+    const svc = scope.load(c, positional.items[0]);
+    var opts = runOptions(c, "rollback");
+    opts.from = std.fmt.parseInt(u32, positional.items[1], 10) catch die("N is a deployment number", .{});
+    opts.restore_env = true;
+    try deploy.run(c.store, c.eng, try varsFor(c), c.store.idOf(svc), opts);
 }
 
 fn varsFor(c: *Ctx) !vars_mod.Vars {
@@ -554,7 +600,7 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
 
 fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     var opts: deploy.Options = .{};
-    var run_opts: deploy.RunOptions = .{ .gpa = c.gpa, .io = c.io, .github_api = c.env.get("PHARBOR_GITHUB_API") orelse "" };
+    var run_opts = runOptions(c, "cli");
     var scope: Scope = .{};
     var name: ?[]const u8 = null;
     var domains: std.ArrayList([]const u8) = .empty;
@@ -577,6 +623,8 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
             opts.build_command = value(args, &i);
         } else if (eql(o, "--start-command")) {
             opts.start_command = value(args, &i);
+        } else if (eql(o, "--pre-deploy")) {
+            opts.pre_deploy = value(args, &i);
         } else if (eql(o, "--no-auto-deploy")) {
             opts.auto_deploy = false;
         } else if (eql(o, "--port")) {
