@@ -12,6 +12,8 @@ const crypto = @import("crypto.zig");
 const github = @import("github.zig");
 const detect = @import("detect.zig");
 const backup = @import("backup.zig");
+const cron = @import("cron.zig");
+const scheduler = @import("scheduler.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Deployment = store_mod.Deployment;
@@ -30,6 +32,7 @@ pub const Options = struct {
     start_command: ?[]const u8 = null,
     pre_deploy: ?[]const u8 = null,
     volumes: []const []const u8 = &.{},
+    cron: ?[]const u8 = null,
     port: ?u16 = null,
     domains: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -150,6 +153,7 @@ pub fn configure(store: Store, vars: vars_mod.Vars, name: []const u8, opts: Opti
     if (opts.build_command) |v| svc.build_command = v;
     if (opts.start_command) |v| svc.start_command = v;
     if (opts.pre_deploy) |v| svc.pre_deploy = v;
+    if (opts.cron) |v| svc.cron = v;
     if (opts.volumes.len > 0) {
         var vols: std.ArrayList(store_mod.Volume) = .empty;
         try vols.appendSlice(a, svc.volumes);
@@ -328,6 +332,12 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         if (try eng.runTo(pre.items, log.fd) != 0) return error.PreDeployFailed;
     }
 
+    if (svc.cron.len > 0) {
+        // Only the deployment's own files: no container to start.
+        try sys.mkdirP(store.deploymentDir(id), 0o700);
+        return schedule(store, eng, id, svc, record, log);
+    }
+
     // Two versions must not write to one volume at once, so a service with
     // volumes has a short gap between them, as on Railway.
     var paused: []const u8 = "";
@@ -480,7 +490,92 @@ pub fn forget(store: Store, eng: *Engine, vars: vars_mod.Vars, svc: Service) voi
     store.remove(id);
 }
 
-fn volumeArgs(store: Store, id: []const u8, svc: Service) ![]const []const u8 {
+/// A cron service keeps no container running: its deployment only makes the
+/// image ready for the scheduler.
+fn schedule(store: Store, eng: *Engine, id: []const u8, svc: *Service, record: *Deployment, log: Log) !void {
+    _ = try cron.Schedule.parse(svc.cron);
+    var old: []const u8 = "";
+    {
+        const lock = try store.lock();
+        defer store.unlock(lock);
+        var current = try store.load(id);
+        old = current.container;
+        current.container = "";
+        current.host_port = 0;
+        current.asleep = false;
+        current.deployed_at = nowS();
+        try store.save(current);
+        store.syncRoutes();
+    }
+    if (old.len > 0) {
+        eng.stop(old, 10);
+        eng.remove(old);
+    }
+    record.status = "active";
+    record.finished_at = nowS();
+    try store.saveDeployment(id, record.*);
+    retirePrevious(store, id, record.number);
+    pruneImages(store, eng, id);
+    log.say("Scheduled: {s} (UTC)", .{svc.cron});
+}
+
+/// One run of a cron service, now. Skipped if the previous one still runs.
+pub fn cronRun(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8) !i32 {
+    const a = store.a;
+    try sys.mkdirP(store.path("cron"), 0o700);
+    var lp = try sys.Path.of(try std.fmt.allocPrint(a, "{s}/cron/{s}.lock", .{ store.root, id }));
+    const lock = try sys.open(lp.z(), sys.O_WRONLY | sys.O_CREAT | sys.O_CLOEXEC, 0o600);
+    defer sys.close(lock);
+    const LOCK_EX = 2;
+    const LOCK_NB = 4;
+    if (sys.linux.errno(sys.linux.flock(lock, LOCK_EX | LOCK_NB)) != .SUCCESS) {
+        var last = scheduler.lastRun(store, id) orelse scheduler.LastRun{};
+        last.skipped = true;
+        scheduler.saveLastRun(store, id, last);
+        return error.StillRunning;
+    }
+
+    const svc = try store.load(id);
+    var active: ?Deployment = null;
+    for (try store.listDeployments(id)) |d| {
+        if (std.mem.eql(u8, d.status, "active")) {
+            active = d;
+            break;
+        }
+    }
+    const d = active orelse return error.NotDeployed;
+    const env = try loadSnapshot(store, vars, id, d.number);
+
+    var p = try sys.Path.of(scheduler.logPath(store, id));
+    const log_fd = try sys.open(p.z(), sys.O_WRONLY | sys.O_CREAT | sys.O_APPEND | sys.O_CLOEXEC, 0o600);
+    defer sys.close(log_fd);
+    var ts: [40]u8 = undefined;
+    const header = try std.fmt.allocPrint(a, "=== run at {s}, deployment {d}\n", .{ sys.fmtTime(&ts, sys.nowNs()), d.number });
+    try sys.writeAll(log_fd, header);
+
+    const name = try std.fmt.allocPrint(a, "{s}-{s}-{s}-cron", .{ svc.project, svc.environment, svc.name });
+    eng.remove(name);
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.appendSlice(a, &.{ "run", "--rm", "--name", name, "--hostname", store.publicLabel(svc) });
+    for (env) |v| try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
+    try args.appendSlice(a, try volumeArgs(store, id, svc));
+    const override = svc.start_command.len > 0 and !std.mem.startsWith(u8, d.image, "pharbor-");
+    if (override) try args.appendSlice(a, &.{ "--entrypoint", "sh" });
+    try args.append(a, d.image);
+    if (override) try args.appendSlice(a, &.{ "-c", svc.start_command });
+
+    var this_run: scheduler.LastRun = .{ .started_at = nowS() };
+    scheduler.saveLastRun(store, id, this_run);
+    const code = try eng.runTo(args.items, log_fd);
+    this_run.finished_at = nowS();
+    this_run.exit_code = code;
+    scheduler.saveLastRun(store, id, this_run);
+    const footer = try std.fmt.allocPrint(a, "=== exit code {d}\n", .{code});
+    try sys.writeAll(log_fd, footer);
+    return code;
+}
+
+pub fn volumeArgs(store: Store, id: []const u8, svc: Service) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (svc.volumes) |v| {
         const dir = backup.volumeDir(store, id, v.name);
@@ -501,7 +596,7 @@ fn pruneImages(store: Store, eng: *Engine, id: []const u8) void {
     }
 }
 
-fn loadSnapshot(store: Store, vars: vars_mod.Vars, id: []const u8, number: u32) ![]vars_mod.Var {
+pub fn loadSnapshot(store: Store, vars: vars_mod.Vars, id: []const u8, number: u32) ![]vars_mod.Var {
     const file = try std.fmt.allocPrint(store.a, "{s}/{d}.env", .{ store.deploymentDir(id), number });
     const sealed = sys.readFileAlloc(store.a, file, 1 << 22) catch return error.NoSuchDeployment;
     const json = try crypto.open(store.a, vars.key, sealed);

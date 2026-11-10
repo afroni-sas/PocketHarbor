@@ -18,6 +18,8 @@ const vars_mod = @import("vars.zig");
 const dns = @import("dns.zig");
 const github = @import("github.zig");
 const backup = @import("backup.zig");
+const cron = @import("cron.zig");
+const scheduler = @import("scheduler.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
@@ -46,6 +48,7 @@ const usage =
     \\      --no-auto-deploy               Do not deploy on each push
     \\      --pre-deploy CMD               Runs in the new version before it takes traffic
     \\      --volume /PATH                 Data that survives deployments (repeatable)
+    \\      --cron "MIN HOUR DAY MONTH WEEKDAY"   Run on a schedule (UTC) instead of always
     \\      --port N                       Port the app listens on (default: detect)
     \\      --domain NAME                  Hostname to answer for (repeatable)
     \\      -e, --env KEY=VALUE            Environment variable (repeatable)
@@ -56,6 +59,8 @@ const usage =
     \\  rm NAME                            Remove a service
     \\  logs NAME [-f] [--tail N]          Application output
     \\  logs --http NAME [-f] [--tail N]   HTTP requests, as JSON lines
+    \\  run NAME                           Run a cron service now
+    \\  logs --cron NAME                   What its runs printed
     \\  deployments NAME                   Deployment history
     \\  redeploy NAME                      The current image again, with current variables
     \\  rollback NAME N                    Deployment N again: its image and its variables
@@ -191,6 +196,9 @@ pub fn main(init: std.process.Init) !void {
         .{ "github", cmdGithub },
         .{ "registry", cmdRegistry },
         .{ "volume", cmdVolume },
+        .{ "run", cmdRun },
+        .{ "_cronrun", cmdCronRun },
+        .{ "_backupjob", cmdBackupJob },
         .{ "backup", cmdBackup },
     };
     inline for (commands) |c| {
@@ -333,6 +341,8 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
         .pdock = c.eng.bin,
         .envp = c.envp,
     };
+    const thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, scheduler.run, .{ c.store.root, c.envp });
+    thread.detach();
     try httpd.serve(.{ .ip = .{ 127, 0, 0, 1 }, .port = s.panel_port }, api.handle, panel);
 }
 
@@ -451,6 +461,37 @@ fn humanSize(a: Allocator, n: u64) []const u8 {
         std.fmt.allocPrint(a, "{d:.1} MB", .{f / (1 << 20)})
     else
         std.fmt.allocPrint(a, "{d:.1} KB", .{f / 1024})) catch "";
+}
+
+fn cmdRun(c: *Ctx, args: []const [:0]const u8) !void {
+    var scope: Scope = .{};
+    var name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (!scope.take(args, &i)) name = args[i];
+    }
+    const svc = scope.load(c, name orelse die("usage: pharbor run NAME", .{}));
+    if (svc.cron.len == 0) die("{s} is not a cron service", .{svc.name});
+    const code = deploy.cronRun(c.store, c.eng, try varsFor(c), c.store.idOf(svc)) catch |e| die("{s}", .{@errorName(e)});
+    const log = sys.readFileAlloc(c.a, scheduler.logPath(c.store, c.store.idOf(svc)), 1 << 26) catch "";
+    // The output of this run: everything after the last header.
+    const start = std.mem.lastIndexOf(u8, log, "=== run at ") orelse 0;
+    sys.print("{s}", .{log[start..]});
+    linux.exit_group(@intCast(@min(@max(code, 0), 255)));
+}
+
+fn cmdCronRun(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len != 1) return;
+    _ = deploy.cronRun(c.store, c.eng, try varsFor(c), args[0]) catch {};
+}
+
+fn cmdBackupJob(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len != 1) return;
+    const svc = c.store.load(args[0]) catch return;
+    for (svc.volumes) |v| {
+        _ = backup.create(c.store, c.eng, svc, v.name, true) catch continue;
+        backup.prune(c.store, args[0], v.name, 7);
+    }
 }
 
 fn cmdVolume(c: *Ctx, args: []const [:0]const u8) !void {
@@ -760,6 +801,10 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
             const m = value(args, &i);
             if (!backup.validMount(m)) die("--volume takes an absolute path inside the container, like /data", .{});
             try volumes.append(c.a, m);
+        } else if (eql(o, "--cron")) {
+            const expr = value(args, &i);
+            if (expr.len > 0 and !cron.valid(expr)) die("--cron takes five fields, like \"*/5 * * * *\" (UTC)", .{});
+            opts.cron = expr;
         } else if (eql(o, "--pre-deploy")) {
             opts.pre_deploy = value(args, &i);
         } else if (eql(o, "--no-auto-deploy")) {
@@ -814,7 +859,14 @@ fn cmdLs(c: *Ctx, args: []const [:0]const u8) !void {
     for (try c.store.list()) |svc| {
         if (filtered and (!eql(svc.project, scope.project) or !eql(svc.environment, scope.environment))) continue;
         const info = if (svc.container.len > 0) c.eng.inspect(svc.container) else null;
-        const status: []const u8 = if (svc.asleep) "asleep" else if (info) |d| d.status else "not deployed";
+        const status: []const u8 = if (svc.cron.len > 0 and svc.deployment > 0)
+            "scheduled"
+        else if (svc.asleep)
+            "asleep"
+        else if (info) |d|
+            d.status
+        else
+            "not deployed";
         const names = try c.store.hostnames(svc, s);
         const shown = if (eql(svc.project, store_mod.default_project))
             svc.name
@@ -954,6 +1006,7 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
     var follow = false;
     var tail: ?usize = null;
     var deployment: ?u32 = null;
+    var cron_log = false;
     var name: ?[]const u8 = null;
     var scope: Scope = .{};
     var i: usize = 0;
@@ -967,6 +1020,8 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
             follow = true;
         } else if (eql(o, "--tail")) {
             tail = std.fmt.parseInt(usize, value(args, &i), 10) catch die("invalid --tail", .{});
+        } else if (eql(o, "--cron")) {
+            cron_log = true;
         } else if (eql(o, "--deploy")) {
             deployment = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid --deploy", .{});
         } else if (name == null) {
@@ -979,6 +1034,11 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
     const svc = scope.load(c, n);
     const id = c.store.idOf(svc);
 
+    if (cron_log) {
+        const data = sys.readFileAlloc(c.a, scheduler.logPath(c.store, id), 1 << 26) catch "";
+        printTail(data, tail orelse 200);
+        return;
+    }
     if (deployment) |number| {
         const data = sys.readFileAlloc(c.a, c.store.deploymentLog(id, number), 1 << 26) catch die("no such deployment", .{});
         sys.print("{s}", .{data});
