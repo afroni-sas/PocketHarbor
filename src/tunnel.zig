@@ -26,13 +26,9 @@ fn findUrl(text: []const u8) ?[]const u8 {
 
 /// A temporary public URL, with no Cloudflare account. It answers for one
 /// service, since the hostname is chosen by Cloudflare.
-pub fn quick(store: Store, eng: *Engine, service: []const u8) !void {
-    if (!store.exists(service)) {
-        sys.eprint("error: no service named {s}\n", .{service});
-        return error.NoSuchService;
-    }
+pub fn quick(store: Store, eng: *Engine, id: []const u8) !void {
     var s = store.settings();
-    s.default_service = service;
+    s.default_service = id;
     try store.saveSettings(s);
     store.syncRoutes();
 
@@ -47,7 +43,7 @@ pub fn quick(store: Store, eng: *Engine, service: []const u8) !void {
     var waited: u32 = 0;
     while (waited < 120) : (waited += 1) {
         if (findUrl(eng.logs(container))) |url| {
-            sys.print("{s} -> {s}\n", .{ url, service });
+            sys.print("{s} -> {s}\n", .{ url, id });
             return;
         }
         const info = eng.inspect(container) orelse break;
