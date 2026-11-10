@@ -45,6 +45,15 @@ fn handle(sig: linux.SIG, f: anytype) void {
     _ = linux.sigaction(sig, &act, null);
 }
 
+/// The phone reached by its IP address, rather than by a service's name.
+fn isAddress(host: []const u8) bool {
+    if (std.mem.eql(u8, host, "localhost") or (host.len > 0 and host[0] == '[')) return true;
+    for (host) |ch| {
+        if (!std.ascii.isDigit(ch) and ch != '.') return false;
+    }
+    return true;
+}
+
 /// Must run before the pid file exists: SIGHUP would otherwise be fatal.
 pub fn installSignals() void {
     handle(.HUP, onHup);
@@ -407,8 +416,10 @@ pub const Proxy = struct {
         self.release(c);
 
         const r = self.table.lookup(host) orelse {
+            if (self.table.panel_port != 0 and isAddress(host)) return self.startUpstream(c, self.table.panel_port);
             return self.respond(c, 404, "No service answers for this name.");
         };
+        if (std.mem.eql(u8, r.service, routes.panel_service)) return self.startUpstream(c, r.port);
         c.service.set(r.service);
         const s = self.statFor(r.service);
         s.active += 1;

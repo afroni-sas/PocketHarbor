@@ -70,6 +70,9 @@ pub const Settings = struct {
     /// The service that answers for any hostname nothing else claims.
     default_service: []const u8 = "",
     proxy_port: u16 = 8080,
+    /// The panel answers here, and at the phone's own address.
+    panel_domain: []const u8 = "",
+    panel_port: u16 = 8090,
 };
 
 /// Names end up in hostnames and file paths.
@@ -344,7 +347,11 @@ pub const Store = struct {
                 }) catch return;
             }
         }
-        const data = std.json.Stringify.valueAlloc(self.a, routes.Document{ .routes = out.items }, .{}) catch return;
+        if (s.panel_domain.len > 0) {
+            out.append(self.a, .{ .host = s.panel_domain, .service = routes.panel_service, .port = s.panel_port }) catch return;
+        }
+        const doc: routes.Document = .{ .routes = out.items, .panel_port = s.panel_port };
+        const data = std.json.Stringify.valueAlloc(self.a, doc, .{}) catch return;
         sys.writeFileAtomic(self.path("routes.json"), data, 0o600) catch return;
         if (self.proxyPid()) |pid| _ = linux.kill(pid, .HUP);
     }
