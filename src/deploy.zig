@@ -9,6 +9,8 @@ const engine = @import("engine.zig");
 const store_mod = @import("store.zig");
 const vars_mod = @import("vars.zig");
 const crypto = @import("crypto.zig");
+const github = @import("github.zig");
+const detect = @import("detect.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Deployment = store_mod.Deployment;
@@ -19,6 +21,12 @@ pub const Options = struct {
     project: []const u8 = store_mod.default_project,
     environment: []const u8 = store_mod.default_environment,
     image: ?[]const u8 = null,
+    repo: ?[]const u8 = null,
+    branch: ?[]const u8 = null,
+    root_dir: ?[]const u8 = null,
+    auto_deploy: ?bool = null,
+    build_command: ?[]const u8 = null,
+    start_command: ?[]const u8 = null,
     port: ?u16 = null,
     domains: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -103,6 +111,13 @@ fn explain(e: anyerror) []const u8 {
         error.NoPortOpened => "the app never opened a port",
         error.HealthCheckTimedOut => "the health check never passed",
         error.StartFailed => "the container could not be started",
+        error.BuildFailed => "the build failed",
+        error.RepoNotFound => "the repository or branch was not found (private? set a GitHub token)",
+        error.GitHubDenied => "GitHub refused the token",
+        error.NoStartCommand => "no start command was found; set one",
+        error.UnknownLanguage => "no Dockerfile, and the language was not recognised",
+        error.BadRootDir => "the root directory is not in the repository",
+        error.UnsafePath => "the archive tried to write outside its directory",
         else => @errorName(e),
     };
 }
@@ -115,7 +130,19 @@ pub fn configure(store: Store, vars: vars_mod.Vars, name: []const u8, opts: Opti
         try store.load(id)
     else
         .{ .name = name, .project = opts.project, .environment = opts.environment };
-    if (opts.image) |i| svc.image = i;
+    if (opts.image) |i| {
+        svc.image = i;
+        svc.repo = "";
+    }
+    if (opts.repo) |r| {
+        svc.repo = r;
+        svc.image = "";
+    }
+    if (opts.branch) |b| svc.branch = b;
+    if (opts.root_dir) |d| svc.root_dir = d;
+    if (opts.auto_deploy) |v| svc.auto_deploy = v;
+    if (opts.build_command) |v| svc.build_command = v;
+    if (opts.start_command) |v| svc.start_command = v;
     if (opts.port) |p| svc.port = p;
     if (opts.health_path) |p| svc.health_path = p;
     if (opts.sleep_after_s) |s| svc.sleep_after_s = s;
@@ -159,7 +186,11 @@ fn lockService(store: Store, id: []const u8) !i32 {
 }
 
 pub const RunOptions = struct {
+    /// For downloads from GitHub.
+    gpa: Allocator,
+    io: std.Io,
     trigger: []const u8 = "cli",
+    github_api: []const u8 = "",
     echo: bool = true,
     timeout_s: u32 = default_timeout_s,
 };
@@ -171,8 +202,8 @@ pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts
     defer sys.close(service_lock);
 
     var svc = try store.load(id);
-    if (svc.image.len == 0) {
-        sys.eprint("error: {s} has no image yet; pass --image\n", .{svc.name});
+    if (svc.image.len == 0 and svc.repo.len == 0) {
+        sys.eprint("error: {s} has nothing to run yet; pass --image or --repo\n", .{svc.name});
         return error.NoImage;
     }
 
@@ -188,7 +219,7 @@ pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts
     const container = try std.fmt.allocPrint(a, "{s}-{s}-{s}-{d}", .{ svc.project, svc.environment, svc.name, number });
     var record: Deployment = .{
         .number = number,
-        .image = svc.image,
+        .image = if (svc.repo.len > 0) svc.repo else svc.image,
         .trigger = opts.trigger,
         .container = container,
         .created_at = nowS(),
@@ -196,7 +227,7 @@ pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts
     try store.saveDeployment(id, record);
     const log = try Log.open(store, id, number, opts.echo);
     defer sys.close(log.fd);
-    log.say("Deployment {d} of {s}: {s}", .{ number, svc.name, svc.image });
+    log.say("Deployment {d} of {s}: {s}", .{ number, svc.name, record.image });
 
     ship(store, eng, vars, id, &svc, &record, log, opts) catch |e| {
         log.say("Deployment failed: {s}", .{explain(e)});
@@ -219,6 +250,16 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
     for (warnings.items) |w| log.say("warning: {s}", .{w});
     try saveSnapshot(store, vars, id, record.number, env);
 
+    // A start command replaces what the image runs, unless the generated
+    // Dockerfile already carries it.
+    var start_override = svc.start_command.len > 0;
+    if (svc.repo.len > 0) {
+        const built = try build(store, eng, vars, id, svc, record, log, opts, env);
+        record.image = built.image;
+        start_override = start_override and !built.generated;
+        try store.saveDeployment(id, record.*);
+    }
+
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(a, &.{ "run", "-d", "--name", container, "--restart", "always", "--hostname", store.publicLabel(svc.*) });
     var has_port = false;
@@ -227,7 +268,9 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "PORT={d}", .{if (svc.port != 0) svc.port else default_port}) });
     }
     for (env) |v| try args.appendSlice(a, &.{ "-e", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
-    try args.append(a, svc.image);
+    if (start_override) try args.appendSlice(a, &.{ "--entrypoint", "sh" });
+    try args.append(a, record.image);
+    if (start_override) try args.appendSlice(a, &.{ "-c", svc.start_command });
 
     log.say("Starting the container", .{});
     const started = try eng.output(args.items);
@@ -271,6 +314,7 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
     record.finished_at = nowS();
     try store.saveDeployment(id, record.*);
     retirePrevious(store, id, record.number);
+    pruneImages(store, eng, id);
 
     if (old.len > 0 and !std.mem.eql(u8, old, container)) {
         sys.sleepMs(drain_ms);
@@ -278,6 +322,96 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         eng.remove(old);
     }
     log.say("Deployed {s}", .{svc.name});
+}
+
+const Built = struct { image: []const u8, generated: bool };
+
+/// Fetches the commit at the tip of the branch, and builds it.
+fn build(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *Service, record: *Deployment, log: Log, opts: RunOptions, env: []const vars_mod.Var) !Built {
+    const a = store.a;
+    const s = store.settings();
+    const token = if (s.github_token.len > 0) try crypto.open(a, vars.key, s.github_token) else "";
+    var client: github.Client = .{ .gpa = opts.gpa, .io = opts.io, .token = token };
+    if (opts.github_api.len > 0) client.api = opts.github_api;
+
+    log.say("Fetching {s}@{s}", .{ svc.repo, svc.branch });
+    const commit = try client.latestCommit(a, svc.repo, svc.branch);
+    record.commit = commit.sha[0..@min(7, commit.sha.len)];
+    record.message = commit.message;
+    try store.saveDeployment(id, record.*);
+    log.say("Commit {s}: {s}", .{ record.commit, record.message });
+
+    const dir = try std.fmt.allocPrint(a, "{s}/builds/{s}-{d}", .{ store.root, id, record.number });
+    sys.rmrf(dir) catch {};
+    try sys.mkdirP(dir, 0o700);
+    defer sys.rmrf(dir) catch {};
+    const archive = try std.fmt.allocPrint(a, "{s}/source.tar.gz", .{dir});
+    try client.tarball(a, svc.repo, commit.sha, archive);
+    const src = try std.fmt.allocPrint(a, "{s}/src", .{dir});
+    const files = try github.extract(opts.gpa, opts.io, archive, src);
+    log.say("Fetched {d} files", .{files});
+
+    if (std.mem.indexOf(u8, svc.root_dir, "..") != null) return error.BadRootDir;
+    const context = if (svc.root_dir.len > 0)
+        try std.fmt.allocPrint(a, "{s}/{s}", .{ src, std.mem.trim(u8, svc.root_dir, "/") })
+    else
+        src;
+    var cp = try sys.Path.of(context);
+    if (!sys.exists(cp.z())) return error.BadRootDir;
+
+    var dockerfile = try std.fmt.allocPrint(a, "{s}/Dockerfile", .{context});
+    var generated = false;
+    var dp = try sys.Path.of(dockerfile);
+    if (sys.exists(dp.z())) {
+        log.say("Building with the repository's Dockerfile", .{});
+    } else {
+        const plan = (try detect.detect(a, context, .{
+            .build_command = svc.build_command,
+            .start_command = svc.start_command,
+        })) orelse return error.UnknownLanguage;
+        dockerfile = try std.fmt.allocPrint(a, "{s}/Dockerfile.pharbor", .{context});
+        try sys.writeFile(dockerfile, plan.dockerfile, 0o600);
+        generated = true;
+        log.say("Detected {s}. Generated Dockerfile:", .{plan.language});
+        log.raw(plan.dockerfile);
+        if (plan.port != 0 and svc.port == 0) svc.port = plan.port;
+    }
+
+    const tag = try std.fmt.allocPrint(a, "pharbor-{s}:{d}", .{ id, record.number });
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.appendSlice(a, &.{ "build", "-t", tag, "-f", dockerfile });
+    // Like Railway, variables are available to ARG lines of the build.
+    for (env) |v| try args.appendSlice(a, &.{ "--build-arg", try std.fmt.allocPrint(a, "{s}={s}", .{ v.name, v.value }) });
+    try args.append(a, context);
+    if (opts.echo) sys.print("Building (pharbor logs --deploy {d} {s} shows the output)\n", .{ record.number, svc.name });
+    if (try eng.runTo(args.items, log.fd) != 0) return error.BuildFailed;
+    log.say("Built {s}", .{tag});
+    return .{ .image = tag, .generated = generated };
+}
+
+/// Removes a service with its container and the images built for it.
+/// Callers hold the store lock.
+pub fn forget(store: Store, eng: *Engine, vars: vars_mod.Vars, svc: Service) void {
+    const id = store.idOf(svc);
+    if (svc.container.len > 0) eng.remove(svc.container);
+    if (store.listDeployments(id)) |all| {
+        for (all) |d| {
+            if (std.mem.startsWith(u8, d.image, "pharbor-")) _ = eng.output(&.{ "rmi", d.image }) catch {};
+        }
+    } else |_| {}
+    vars.dropService(svc.project, svc.environment, svc.name);
+    store.remove(id);
+}
+
+/// Built images are kept for the five latest deployments, for rollbacks.
+fn pruneImages(store: Store, eng: *Engine, id: []const u8) void {
+    const all = store.listDeployments(id) catch return;
+    var kept: usize = 0;
+    for (all) |d| {
+        if (!std.mem.startsWith(u8, d.image, "pharbor-")) continue;
+        kept += 1;
+        if (kept > 5) _ = eng.output(&.{ "rmi", d.image }) catch {};
+    }
 }
 
 /// What a deployment ran with, so that it can be run again exactly.
