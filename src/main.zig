@@ -1,0 +1,502 @@
+//! PocketHarbor: deploy and serve applications from an Android phone.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const sys = @import("sys.zig");
+const net = @import("net.zig");
+const engine = @import("engine.zig");
+const routes = @import("routes.zig");
+const proxy = @import("proxy.zig");
+const deploy = @import("deploy.zig");
+const tunnel = @import("tunnel.zig");
+const store_mod = @import("store.zig");
+const Store = store_mod.Store;
+const Engine = engine.Engine;
+const Allocator = std.mem.Allocator;
+const linux = sys.linux;
+
+const version = "0.1.0";
+
+const usage =
+    \\PocketHarbor: deploy and serve applications from an Android phone.
+    \\
+    \\Usage: pharbor <command> [options]
+    \\
+    \\Serving
+    \\  serve [-d] [--listen [ADDR:]PORT]  Run the HTTP proxy (default 0.0.0.0:8080)
+    \\  install                            Start the proxy when the phone boots (Termux:Boot)
+    \\
+    \\Services
+    \\  deploy NAME [options]              Deploy a new version without downtime
+    \\      --image IMAGE                  Image to run
+    \\      --port N                       Port the app listens on (default: detect)
+    \\      --domain NAME                  Hostname to answer for (repeatable)
+    \\      -e, --env KEY=VALUE            Environment variable (repeatable)
+    \\      --health PATH                  HTTP path that must answer 2xx or 3xx
+    \\      --sleep-after TIME             Stop after this long idle, e.g. 10m; 0 is never
+    \\      --timeout SEC                  Time allowed to become healthy (default 180)
+    \\  ls                                 List services
+    \\  rm NAME                            Remove a service
+    \\  logs NAME [-f] [--tail N]          Application output
+    \\  logs --http NAME [-f] [--tail N]   HTTP requests, as JSON lines
+    \\
+    \\Domains
+    \\  domain add NAME HOSTNAME           Answer for a hostname (*.example.com works)
+    \\  domain rm NAME HOSTNAME
+    \\  domain ls
+    \\  domain base [DOMAIN|--clear]       Give every service NAME.DOMAIN
+    \\
+    \\Public access
+    \\  tunnel quick NAME                  A temporary public URL, no account needed
+    \\  tunnel start TOKEN                 A permanent Cloudflare tunnel
+    \\  tunnel status
+    \\  tunnel stop
+    \\
+    \\  version
+    \\
+    \\Environment: PHARBOR_ROOT (data directory), PDOCK_BIN (path to pdock)
+    \\
+;
+
+const Ctx = struct {
+    a: Allocator,
+    gpa: Allocator,
+    store: Store,
+    eng: *Engine,
+    envp: engine.Envp,
+    env: *std.process.Environ.Map,
+};
+
+fn die(comptime f: []const u8, args: anytype) noreturn {
+    sys.eprint("error: " ++ f ++ "\n", args);
+    linux.exit_group(1);
+}
+
+fn eql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+fn dataRoot(a: Allocator, env: *std.process.Environ.Map) ![]const u8 {
+    if (env.get("PHARBOR_ROOT")) |r| return a.dupe(u8, r);
+    const home = env.get("HOME") orelse "";
+    if (home.len > 1) return std.fmt.allocPrint(a, "{s}/.pocketharbor", .{home});
+    // `adb shell` has HOME=/, which is not writable.
+    var buf: [sys.PATH_MAX]u8 = undefined;
+    const n = try sys.ck(linux.getcwd(&buf, buf.len));
+    return std.fmt.allocPrint(a, "{s}/.pocketharbor", .{buf[0 .. n - 1]});
+}
+
+pub fn main(init: std.process.Init) !void {
+    const a = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(a);
+    if (args.len < 2 or eql(args[1], "help") or eql(args[1], "--help") or eql(args[1], "-h")) {
+        sys.print("{s}", .{usage});
+        return;
+    }
+    const cmd: []const u8 = args[1];
+    const rest: []const [:0]const u8 = args[2..];
+    if (eql(cmd, "version")) {
+        sys.print("pharbor {s} (zig {s})\n", .{ version, builtin.zig_version_string });
+        return;
+    }
+
+    const root = try dataRoot(a, init.environ_map);
+    try sys.mkdirP(root, 0o700);
+    const store = try Store.init(a, root);
+    const block = try init.environ_map.createPosixBlock(a, .{});
+    const envp: engine.Envp = @ptrCast(block.slice.ptr);
+    const eng = try a.create(Engine);
+    eng.* = .{ .a = a, .bin = try engine.locate(a, init.environ_map), .envp = envp };
+    var ctx: Ctx = .{ .a = a, .gpa = init.gpa, .store = store, .eng = eng, .envp = envp, .env = init.environ_map };
+
+    const commands = .{
+        .{ "serve", cmdServe },
+        .{ "install", cmdInstall },
+        .{ "deploy", cmdDeploy },
+        .{ "ls", cmdLs },
+        .{ "rm", cmdRm },
+        .{ "logs", cmdLogs },
+        .{ "domain", cmdDomain },
+        .{ "tunnel", cmdTunnel },
+        .{ "_wake", cmdWake },
+        .{ "_sleep", cmdSleep },
+    };
+    inline for (commands) |c| {
+        if (eql(cmd, c[0])) {
+            c[1](&ctx, rest) catch |e| {
+                // Commands print their own explanation for these.
+                if (e != error.DeployFailed and e != error.TunnelFailed) {
+                    if (e == error.Sys) die("{s}: {s}", .{ cmd, @tagName(sys.last) });
+                    die("{s}: {s}", .{ cmd, @errorName(e) });
+                }
+                linux.exit_group(1);
+            };
+            return;
+        }
+    }
+    die("unknown command \"{s}\" (try: pharbor help)", .{cmd});
+}
+
+fn value(args: []const [:0]const u8, i: *usize) []const u8 {
+    i.* += 1;
+    if (i.* >= args.len) die("{s} needs a value", .{args[i.* - 1]});
+    return args[i.*];
+}
+
+/// Seconds from `90`, `90s`, `10m`, `2h` or `1d`.
+fn parseDuration(s: []const u8) !u32 {
+    if (s.len == 0) return error.BadDuration;
+    const unit: u32 = switch (s[s.len - 1]) {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        '0'...'9' => return std.fmt.parseInt(u32, s, 10),
+        else => return error.BadDuration,
+    };
+    return (try std.fmt.parseInt(u32, s[0 .. s.len - 1], 10)) * unit;
+}
+
+fn checkName(name: []const u8) void {
+    if (!store_mod.validName(name)) die("invalid service name \"{s}\": use a-z, 0-9 and -", .{name});
+}
+
+fn checkDomain(d: []const u8) void {
+    if (!store_mod.validDomain(d)) die("invalid hostname \"{s}\"", .{d});
+}
+
+fn lockProxy(c: *Ctx) !i32 {
+    var p = try sys.Path.of(c.store.path("proxy.lock"));
+    const fd = try sys.open(p.z(), sys.O_WRONLY | sys.O_CREAT | sys.O_CLOEXEC, 0o600);
+    const LOCK_EX = 2;
+    const LOCK_NB = 4;
+    if (linux.errno(linux.flock(fd, LOCK_EX | LOCK_NB)) != .SUCCESS) die("the proxy is already running", .{});
+    return fd;
+}
+
+fn detach(c: *Ctx) void {
+    const pid = sys.fork() catch die("cannot fork", .{});
+    if (pid != 0) linux.exit_group(0);
+    _ = linux.setsid();
+    var log = sys.Path.of(c.store.path("proxy.log")) catch linux.exit_group(1);
+    const out = sys.open(log.z(), sys.O_WRONLY | sys.O_CREAT | sys.O_APPEND, 0o600) catch linux.exit_group(1);
+    const null_fd = sys.open("/dev/null", sys.O_RDWR, 0) catch linux.exit_group(1);
+    _ = linux.dup2(null_fd, 0);
+    _ = linux.dup2(out, 1);
+    _ = linux.dup2(out, 2);
+}
+
+/// Returns in a worker process, and starts another if that one dies. Without
+/// the proxy every service is unreachable, whatever state the services are in.
+fn keepAlive() void {
+    while (true) {
+        const pid = sys.fork() catch linux.exit_group(1);
+        if (pid == 0) return;
+        var status: i32 = 0;
+        _ = linux.waitpid(pid, &status, 0);
+        const s: u32 = @bitCast(status);
+        if (linux.W.IFEXITED(s) and linux.W.EXITSTATUS(s) == 0) linux.exit_group(0);
+        sys.sleepMs(1000);
+    }
+}
+
+/// Writes the Termux:Boot script that starts the proxy with the phone.
+fn cmdInstall(c: *Ctx, _: []const [:0]const u8) !void {
+    const prefix = c.env.get("PREFIX") orelse "";
+    const home = c.env.get("HOME") orelse "";
+    if (std.mem.indexOf(u8, prefix, "com.termux") == null or home.len < 2) {
+        die("run this from Termux (with the Termux:Boot app installed)", .{});
+    }
+    var exe_buf: [sys.PATH_MAX]u8 = undefined;
+    const exe = try sys.readlink("/proc/self/exe", &exe_buf);
+    const dir = try std.fmt.allocPrint(c.a, "{s}/.termux/boot", .{home});
+    try sys.mkdirP(dir, 0o700);
+    const script = try std.fmt.allocPrint(c.a,
+        \\#!{s}/bin/sh
+        \\# Written by `pharbor install`.
+        \\export PHARBOR_ROOT='{s}'
+        \\export PDOCK_BIN='{s}'
+        \\exec '{s}' serve -d
+        \\
+    , .{ prefix, c.store.root, c.eng.bin, exe });
+    const path = try std.fmt.allocPrint(c.a, "{s}/pocketharbor", .{dir});
+    try sys.writeFile(path, script, 0o700);
+    var p = try sys.Path.of(path);
+    try sys.chmod(p.z(), 0o700);
+    sys.print("Installed {s}\nOpen the Termux:Boot app once so that Android lets it run at boot.\n", .{path});
+}
+
+fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
+    var addr: net.Addr = .{ .ip = .{ 0, 0, 0, 0 }, .port = c.store.settings().proxy_port };
+    var background = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const o: []const u8 = args[i];
+        if (eql(o, "-d") or eql(o, "--detach")) {
+            background = true;
+        } else if (eql(o, "--listen")) {
+            addr = net.parseAddr(value(args, &i)) catch die("invalid address", .{});
+        } else {
+            die("unknown option \"{s}\" for serve", .{o});
+        }
+    }
+    _ = try lockProxy(c);
+    // Before detaching, so that a mistake is seen in the terminal.
+    var probe = net.listenTcp(addr) catch |e| {
+        if (sys.last == .ADDRINUSE) die("port {d} is already in use", .{addr.port});
+        return e;
+    };
+    sys.close(probe);
+    probe = -1;
+
+    if (background) {
+        detach(c);
+        keepAlive();
+    }
+    var s = c.store.settings();
+    s.proxy_port = addr.port;
+    try c.store.saveSettings(s);
+    proxy.installSignals();
+    try c.store.writeProxyPid();
+    c.store.syncRoutes();
+
+    var p: proxy.Proxy = .{
+        .gpa = c.gpa,
+        .a = c.a,
+        .store = c.store,
+        .envp = c.envp,
+        .table = routes.Table.empty(c.gpa),
+    };
+    try p.run(addr);
+    var pid = try sys.Path.of(c.store.path("proxy.pid"));
+    sys.unlink(pid.z()) catch {};
+    // Everything it holds goes away with the process.
+    linux.exit_group(0);
+}
+
+fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
+    var opts: deploy.Options = .{};
+    var name: ?[]const u8 = null;
+    var domains: std.ArrayList([]const u8) = .empty;
+    var env: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const o: []const u8 = args[i];
+        if (eql(o, "--image")) {
+            opts.image = value(args, &i);
+        } else if (eql(o, "--port")) {
+            opts.port = std.fmt.parseInt(u16, value(args, &i), 10) catch die("invalid port", .{});
+        } else if (eql(o, "--domain")) {
+            const d = value(args, &i);
+            checkDomain(d);
+            try domains.append(c.a, d);
+        } else if (eql(o, "-e") or eql(o, "--env")) {
+            const e = value(args, &i);
+            if (std.mem.indexOfScalar(u8, e, '=') == null) die("-e needs KEY=VALUE", .{});
+            try env.append(c.a, e);
+        } else if (eql(o, "--health")) {
+            opts.health_path = value(args, &i);
+            if (opts.health_path.?.len > 0 and opts.health_path.?[0] != '/') die("--health needs a path starting with /", .{});
+        } else if (eql(o, "--sleep-after")) {
+            opts.sleep_after_s = parseDuration(value(args, &i)) catch die("invalid duration", .{});
+        } else if (eql(o, "--timeout")) {
+            opts.timeout_s = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid timeout", .{});
+        } else if (o.len > 0 and o[0] == '-') {
+            die("unknown option \"{s}\" for deploy", .{o});
+        } else if (name == null) {
+            name = o;
+        } else {
+            die("unexpected argument \"{s}\"", .{o});
+        }
+    }
+    const n = name orelse die("usage: pharbor deploy NAME --image IMAGE", .{});
+    checkName(n);
+    opts.domains = domains.items;
+    opts.env = env.items;
+    try deploy.deploy(c.store, c.eng, n, opts);
+}
+
+fn cmdLs(c: *Ctx, _: []const [:0]const u8) !void {
+    sys.print("{s: <18}{s: <34}{s: <12}{s: <8}{s}\n", .{ "NAME", "IMAGE", "STATUS", "PORT", "HOSTNAMES" });
+    const s = c.store.settings();
+    for (try c.store.list()) |svc| {
+        const info = if (svc.container.len > 0) c.eng.inspect(svc.container) else null;
+        const status: []const u8 = if (svc.asleep) "asleep" else if (info) |i| i.status else "missing";
+        const names = try c.store.hostnames(svc, s);
+        sys.print("{s: <18}{s: <34}{s: <12}{d: <8}{s}\n", .{
+            svc.name,
+            svc.image,
+            status,
+            svc.port,
+            try std.mem.join(c.a, " ", names),
+        });
+    }
+}
+
+fn cmdRm(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len != 1) die("usage: pharbor rm NAME", .{});
+    const svc = c.store.load(args[0]) catch die("no service named {s}", .{args[0]});
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    c.store.remove(svc.name);
+    c.store.syncRoutes();
+    if (svc.container.len > 0) c.eng.remove(svc.container);
+    sys.print("Removed {s}\n", .{svc.name});
+}
+
+fn printTail(data: []const u8, n: usize) void {
+    var count: usize = 0;
+    var i = data.len;
+    while (i > 0) : (i -= 1) {
+        if (data[i - 1] == '\n') {
+            count += 1;
+            if (count > n) {
+                sys.print("{s}", .{data[i..]});
+                return;
+            }
+        }
+    }
+    sys.print("{s}", .{data});
+}
+
+fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
+    var http_log = false;
+    var follow = false;
+    var tail: ?usize = null;
+    var name: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const o: []const u8 = args[i];
+        if (eql(o, "--http")) {
+            http_log = true;
+        } else if (eql(o, "-f") or eql(o, "--follow")) {
+            follow = true;
+        } else if (eql(o, "--tail")) {
+            tail = std.fmt.parseInt(usize, value(args, &i), 10) catch die("invalid --tail", .{});
+        } else if (name == null) {
+            name = o;
+        } else {
+            die("unexpected argument \"{s}\"", .{o});
+        }
+    }
+    const n = name orelse die("usage: pharbor logs [--http] NAME", .{});
+    const svc = c.store.load(n) catch die("no service named {s}", .{n});
+
+    if (!http_log) {
+        var a: std.ArrayList([]const u8) = .empty;
+        try a.append(c.a, "logs");
+        if (follow) try a.append(c.a, "-f");
+        if (tail) |t| try a.appendSlice(c.a, &.{ "--tail", try std.fmt.allocPrint(c.a, "{d}", .{t}) });
+        try a.append(c.a, svc.container);
+        linux.exit_group(try c.eng.run(a.items));
+    }
+
+    var p = try sys.Path.of(c.store.path(try std.fmt.allocPrint(c.a, "http/{s}.log", .{n})));
+    const data = sys.readFileAlloc(c.a, p.slice(), 1 << 30) catch "";
+    printTail(data, tail orelse 100);
+    if (!follow) return;
+    var offset = data.len;
+    var buf: [65536]u8 = undefined;
+    while (true) {
+        sys.sleepMs(300);
+        const fd = sys.open(p.z(), sys.O_CLOEXEC, 0) catch continue;
+        defer sys.close(fd);
+        var st: sys.Stat = undefined;
+        sys.stat(p.z(), &st) catch continue;
+        // The log was rotated underneath us.
+        if (@as(u64, @intCast(st.size)) < offset) offset = 0;
+        _ = linux.lseek(fd, @intCast(offset), 0);
+        while (true) {
+            const got = sys.read(fd, &buf) catch break;
+            if (got == 0) break;
+            sys.print("{s}", .{buf[0..got]});
+            offset += got;
+        }
+    }
+}
+
+fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 0) die("usage: pharbor domain add|rm|ls|base", .{});
+    const verb: []const u8 = args[0];
+    if (eql(verb, "ls")) {
+        const s = c.store.settings();
+        if (s.base_domain.len > 0) sys.print("base: {s}\n", .{s.base_domain});
+        for (try c.store.list()) |svc| {
+            for (try c.store.hostnames(svc, s)) |h| sys.print("{s: <40}{s}\n", .{ h, svc.name });
+        }
+        return;
+    }
+    if (eql(verb, "base")) {
+        var s = c.store.settings();
+        if (args.len == 1) {
+            sys.print("{s}\n", .{s.base_domain});
+            return;
+        }
+        if (eql(args[1], "--clear")) {
+            s.base_domain = "";
+        } else {
+            checkDomain(args[1]);
+            s.base_domain = args[1];
+        }
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        try c.store.saveSettings(s);
+        c.store.syncRoutes();
+        return;
+    }
+    if (args.len != 3) die("usage: pharbor domain add|rm NAME HOSTNAME", .{});
+    const host: []const u8 = args[2];
+    checkDomain(host);
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    var svc = c.store.load(args[1]) catch die("no service named {s}", .{args[1]});
+    var out: std.ArrayList([]const u8) = .empty;
+    var present = false;
+    for (svc.domains) |d| {
+        if (eql(d, host)) {
+            present = true;
+            if (eql(verb, "rm")) continue;
+        }
+        try out.append(c.a, d);
+    }
+    if (eql(verb, "add")) {
+        if (present) return;
+        for (try c.store.list()) |other| {
+            for (other.domains) |d| {
+                if (eql(d, host)) die("{s} already serves {s}", .{ other.name, host });
+            }
+        }
+        try out.append(c.a, host);
+    } else if (!eql(verb, "rm")) {
+        die("usage: pharbor domain add|rm NAME HOSTNAME", .{});
+    } else if (!present) {
+        die("{s} does not serve {s}", .{ svc.name, host });
+    }
+    svc.domains = out.items;
+    try c.store.save(svc);
+    c.store.syncRoutes();
+}
+
+fn cmdTunnel(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 0) die("usage: pharbor tunnel quick NAME|start TOKEN|status|stop", .{});
+    const verb: []const u8 = args[0];
+    if (eql(verb, "quick") and args.len == 2) return tunnel.quick(c.store, c.eng, args[1]);
+    if (eql(verb, "start") and args.len == 2) return tunnel.named(c.store, c.eng, args[1]);
+    if (eql(verb, "status")) return tunnel.status(c.eng);
+    if (eql(verb, "stop")) return tunnel.stop(c.store, c.eng);
+    die("usage: pharbor tunnel quick NAME|start TOKEN|status|stop", .{});
+}
+
+fn cmdWake(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 1) deploy.wake(c.store, c.eng, args[0]);
+}
+
+fn cmdSleep(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 1) deploy.sleep(c.store, c.eng, args[0]);
+}
+
+test {
+    _ = @import("tunnel.zig");
+    _ = @import("http.zig");
+    _ = @import("routes.zig");
+}

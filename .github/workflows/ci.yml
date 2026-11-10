@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Unit tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Takes the version from minimum_zig_version in build.zig.zon.
+      - uses: mlugg/setup-zig@v2
+
+      - name: Run the unit tests
+        run: zig build test --summary all
+
+      - name: Build for Android
+        run: zig build android
+
+      - name: Build for this machine
+        run: zig build --release
+
+      - name: Start
+        run: ./zig-out/bin/pharbor version
