@@ -1,0 +1,7 @@
+.{
+    .name = .pocketharbor,
+    .fingerprint = 0x6e871c63d706f8be,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
