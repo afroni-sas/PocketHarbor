@@ -10,6 +10,10 @@ const proxy = @import("proxy.zig");
 const deploy = @import("deploy.zig");
 const tunnel = @import("tunnel.zig");
 const store_mod = @import("store.zig");
+const api = @import("api.zig");
+const httpd = @import("httpd.zig");
+const crypto = @import("crypto.zig");
+const auth_mod = @import("auth.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
@@ -57,6 +61,11 @@ const usage =
     \\  domain ls
     \\  domain base [DOMAIN|--clear]       Give every service NAME.DOMAIN
     \\
+    \\Accounts (the panel is at the phone's address, port 8080)
+    \\  user add EMAIL                     Reads the password from stdin
+    \\  user ls | rm EMAIL | reset-2fa EMAIL
+    \\  token create NAME | ls | rm ID    API tokens: Authorization: Bearer ...
+    \\
     \\Public access
     \\  tunnel quick NAME                  A temporary public URL, no account needed
     \\  tunnel start TOKEN                 A permanent Cloudflare tunnel
@@ -76,6 +85,7 @@ const Ctx = struct {
     eng: *Engine,
     envp: engine.Envp,
     env: *std.process.Environ.Map,
+    io: std.Io,
 };
 
 fn die(comptime f: []const u8, args: anytype) noreturn {
@@ -118,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
     const envp: engine.Envp = @ptrCast(block.slice.ptr);
     const eng = try a.create(Engine);
     eng.* = .{ .a = a, .bin = try engine.locate(a, init.environ_map), .envp = envp };
-    var ctx: Ctx = .{ .a = a, .gpa = init.gpa, .store = store, .eng = eng, .envp = envp, .env = init.environ_map };
+    var ctx: Ctx = .{ .a = a, .gpa = init.gpa, .store = store, .eng = eng, .envp = envp, .env = init.environ_map, .io = init.io };
 
     const commands = .{
         .{ "serve", cmdServe },
@@ -134,6 +144,10 @@ pub fn main(init: std.process.Init) !void {
         .{ "tunnel", cmdTunnel },
         .{ "_wake", cmdWake },
         .{ "_sleep", cmdSleep },
+        .{ "_deploy", cmdDeployJob },
+        .{ "_panel", cmdPanel },
+        .{ "user", cmdUser },
+        .{ "token", cmdToken },
     };
     inline for (commands) |c| {
         if (eql(cmd, c[0])) {
@@ -243,6 +257,111 @@ fn keepAlive() void {
     }
 }
 
+/// Runs the panel next to the proxy, restarting it if it dies, and going away
+/// with the proxy.
+fn startPanel(c: *Ctx) void {
+    const PR_SET_PDEATHSIG = 1;
+    const pid = sys.fork() catch return;
+    if (pid != 0) return;
+    _ = linux.prctl(PR_SET_PDEATHSIG, @intFromEnum(linux.SIG.TERM), 0, 0, 0);
+    while (true) {
+        const worker = sys.fork() catch linux.exit_group(1);
+        if (worker == 0) {
+            _ = linux.prctl(PR_SET_PDEATHSIG, @intFromEnum(linux.SIG.TERM), 0, 0, 0);
+            const argv = [_:null]?[*:0]const u8{ "pharbor", "_panel" };
+            _ = linux.execve("/proc/self/exe", &argv, c.envp);
+            linux.exit_group(127);
+        }
+        var status: i32 = 0;
+        _ = linux.waitpid(worker, &status, 0);
+        if (linux.getppid() == 1) linux.exit_group(0);
+        sys.sleepMs(1000);
+    }
+}
+
+fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
+    const s = c.store.settings();
+    const panel = try c.a.create(api.Panel);
+    panel.* = .{
+        .root = c.store.root,
+        .io = c.io,
+        .key = try crypto.loadKey(c.store.root),
+        .pdock = c.eng.bin,
+        .envp = c.envp,
+    };
+    try httpd.serve(.{ .ip = .{ 127, 0, 0, 1 }, .port = s.panel_port }, api.handle, panel);
+}
+
+fn cmdDeployJob(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len != 2) return;
+    deploy.run(c.store, c.eng, args[0], .{ .trigger = args[1], .echo = false }) catch {};
+}
+
+fn authFor(c: *Ctx) !auth_mod.Auth {
+    return .{ .store = c.store, .io = c.io, .key = try crypto.loadKey(c.store.root) };
+}
+
+fn readSecretLine(c: *Ctx) ![]const u8 {
+    var buf: [1024]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = try sys.read(0, buf[len..]);
+        if (n == 0) break;
+        len += n;
+        if (std.mem.indexOfScalar(u8, buf[0..len], '\n') != null) break;
+    }
+    const line = std.mem.trimEnd(u8, buf[0 .. std.mem.indexOfScalar(u8, buf[0..len], '\n') orelse len], "\r");
+    return c.a.dupe(u8, line);
+}
+
+fn cmdUser(c: *Ctx, args: []const [:0]const u8) !void {
+    const usage_line = "usage: pharbor user add EMAIL | ls | rm EMAIL | reset-2fa EMAIL";
+    if (args.len == 0) die(usage_line, .{});
+    const auth = try authFor(c);
+    const verb: []const u8 = args[0];
+    if (eql(verb, "ls")) {
+        for (auth.users()) |u| sys.print("{s: <40}{s}\n", .{ u.email, if (u.totp_enabled) "2FA" else "" });
+        return;
+    }
+    if (args.len != 2) die(usage_line, .{});
+    if (eql(verb, "add")) {
+        sys.eprint("Password: ", .{});
+        const password = try readSecretLine(c);
+        _ = auth.addUser(args[1], password) catch |e| die("{s}", .{@errorName(e)});
+        sys.print("Added {s}\n", .{args[1]});
+        return;
+    }
+    const user = auth.findUser(args[1]) orelse die("no account for {s}", .{args[1]});
+    if (eql(verb, "rm")) {
+        try auth.removeUser(user.id);
+        auth.endAllSessions(user.id);
+    } else if (eql(verb, "reset-2fa")) {
+        // For someone who lost their phone: whoever runs this has the data anyway.
+        try auth.disableTotp(user);
+        auth.endAllSessions(user.id);
+    } else {
+        die(usage_line, .{});
+    }
+}
+
+fn cmdToken(c: *Ctx, args: []const [:0]const u8) !void {
+    const usage_line = "usage: pharbor token create NAME | ls | rm ID";
+    if (args.len == 0) die(usage_line, .{});
+    const auth = try authFor(c);
+    const verb: []const u8 = args[0];
+    if (eql(verb, "ls")) {
+        for (auth.tokens()) |t| sys.print("{s: <14}{s: <30}{s}...\n", .{ t.id, t.name, t.hint });
+    } else if (eql(verb, "create") and args.len == 2) {
+        const made = try auth.createToken(args[1]);
+        sys.print("{s}\n", .{made.token});
+        sys.eprint("Shown once: store it now.\n", .{});
+    } else if (eql(verb, "rm") and args.len == 2) {
+        if (!try auth.removeToken(args[1])) die("no token {s}", .{args[1]});
+    } else {
+        die(usage_line, .{});
+    }
+}
+
 /// Writes the Termux:Boot script that starts the proxy with the phone.
 fn cmdInstall(c: *Ctx, _: []const [:0]const u8) !void {
     const prefix = c.env.get("PREFIX") orelse "";
@@ -296,6 +415,7 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
         detach(c);
         keepAlive();
     }
+    startPanel(c);
     var s = c.store.settings();
     s.proxy_port = addr.port;
     try c.store.saveSettings(s);
@@ -682,6 +802,7 @@ fn cmdSleep(c: *Ctx, args: []const [:0]const u8) !void {
 
 test {
     _ = @import("tunnel.zig");
+    _ = @import("crypto.zig");
     _ = @import("http.zig");
     _ = @import("routes.zig");
 }

@@ -12,11 +12,19 @@ pub const Route = struct {
     sleep_after_s: u32 = 0,
 };
 
-pub const Document = struct { routes: []const Route = &.{} };
+/// The route of the panel itself, which never sleeps.
+pub const panel_service = "pharbor.panel";
+
+pub const Document = struct {
+    routes: []const Route = &.{},
+    /// Requests by IP address or `localhost` reach the panel.
+    panel_port: u16 = 0,
+};
 
 pub const Table = struct {
     arena: std.heap.ArenaAllocator,
     routes: []const Route = &.{},
+    panel_port: u16 = 0,
 
     pub fn empty(gpa: std.mem.Allocator) Table {
         return .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -30,6 +38,7 @@ pub const Table = struct {
             .allocate = .alloc_always,
         });
         table.routes = parsed.routes;
+        table.panel_port = parsed.panel_port;
         return table;
     }
 
