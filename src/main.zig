@@ -14,6 +14,7 @@ const api = @import("api.zig");
 const httpd = @import("httpd.zig");
 const crypto = @import("crypto.zig");
 const auth_mod = @import("auth.zig");
+const vars_mod = @import("vars.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
@@ -60,6 +61,11 @@ const usage =
     \\  domain rm NAME HOSTNAME
     \\  domain ls
     \\  domain base [DOMAIN|--clear]       Give every service NAME.DOMAIN
+    \\
+    \\Variables (encrypted; values may use ${{ KEY }}, ${{ shared.KEY }}, ${{ svc.KEY }})
+    \\  var ls NAME | var ls --shared
+    \\  var set NAME KEY=VALUE... | var set --shared KEY=VALUE...
+    \\  var unset NAME KEY... | var import NAME FILE.env
     \\
     \\Accounts (the panel is at the phone's address, port 8080)
     \\  user add EMAIL                     Reads the password from stdin
@@ -148,6 +154,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "_panel", cmdPanel },
         .{ "user", cmdUser },
         .{ "token", cmdToken },
+        .{ "var", cmdVar },
     };
     inline for (commands) |c| {
         if (eql(cmd, c[0])) {
@@ -294,7 +301,62 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
 
 fn cmdDeployJob(c: *Ctx, args: []const [:0]const u8) !void {
     if (args.len != 2) return;
-    deploy.run(c.store, c.eng, args[0], .{ .trigger = args[1], .echo = false }) catch {};
+    deploy.run(c.store, c.eng, try varsFor(c), args[0], .{ .trigger = args[1], .echo = false }) catch {};
+}
+
+fn varsFor(c: *Ctx) !vars_mod.Vars {
+    return .{ .store = c.store, .key = try crypto.loadKey(c.store.root) };
+}
+
+fn cmdVar(c: *Ctx, args: []const [:0]const u8) !void {
+    const usage_line = "usage: pharbor var ls|set|unset|import [NAME|--shared] ...";
+    if (args.len == 0) die(usage_line, .{});
+    const verb: []const u8 = args[0];
+    var scope: Scope = .{};
+    var shared = false;
+    var positional: std.ArrayList([]const u8) = .empty;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (eql(args[i], "--shared")) {
+            shared = true;
+        } else if (!scope.take(args, &i)) {
+            try positional.append(c.a, args[i]);
+        }
+    }
+    var rest = positional.items;
+    var service: ?[]const u8 = null;
+    if (!shared) {
+        if (rest.len == 0) die(usage_line, .{});
+        _ = scope.load(c, rest[0]);
+        service = rest[0];
+        rest = rest[1..];
+    }
+    const vars = try varsFor(c);
+    if (eql(verb, "ls")) {
+        for (try vars.get(scope.project, scope.environment, service)) |v| sys.print("{s}={s}\n", .{ v.name, v.value });
+        return;
+    }
+    var set: std.ArrayList(vars_mod.Var) = .empty;
+    var unset: std.ArrayList([]const u8) = .empty;
+    if (eql(verb, "set")) {
+        for (rest) |kv| {
+            const eq = std.mem.indexOfScalar(u8, kv, '=') orelse die("set needs KEY=VALUE", .{});
+            try set.append(c.a, .{ .name = kv[0..eq], .value = kv[eq + 1 ..] });
+        }
+    } else if (eql(verb, "unset")) {
+        try unset.appendSlice(c.a, rest);
+    } else if (eql(verb, "import")) {
+        if (rest.len != 1) die("usage: pharbor var import NAME FILE", .{});
+        const text = sys.readFileAlloc(c.a, rest[0], 1 << 20) catch die("cannot read {s}", .{rest[0]});
+        try set.appendSlice(c.a, vars_mod.parseDotenv(c.a, text) catch |e| die("{s}: {s}", .{ rest[0], @errorName(e) }));
+    } else {
+        die(usage_line, .{});
+    }
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    const current = try vars.get(scope.project, scope.environment, service);
+    vars.put(scope.project, scope.environment, service, try vars_mod.merge(c.a, current, set.items, unset.items)) catch |e| die("{s}", .{@errorName(e)});
+    sys.print("Saved. Deploy for the change to take effect.\n", .{});
 }
 
 fn authFor(c: *Ctx) !auth_mod.Auth {
@@ -482,8 +544,9 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     opts.environment = scope.environment;
     opts.domains = domains.items;
     opts.env = env.items;
-    const svc = try deploy.configure(c.store, n, opts);
-    try deploy.run(c.store, c.eng, c.store.idOf(svc), run_opts);
+    const vars = try varsFor(c);
+    const svc = try deploy.configure(c.store, vars, n, opts);
+    try deploy.run(c.store, c.eng, vars, c.store.idOf(svc), run_opts);
 }
 
 fn cmdLs(c: *Ctx, args: []const [:0]const u8) !void {
@@ -527,6 +590,7 @@ fn cmdRm(c: *Ctx, args: []const [:0]const u8) !void {
     const svc = scope.load(c, n);
     const lock = try c.store.lock();
     defer c.store.unlock(lock);
+    (try varsFor(c)).dropService(svc.project, svc.environment, svc.name);
     c.store.remove(c.store.idOf(svc));
     c.store.syncRoutes();
     if (svc.container.len > 0) c.eng.remove(svc.container);
@@ -570,6 +634,8 @@ fn cmdProject(c: *Ctx, args: []const [:0]const u8) !void {
             c.store.remove(c.store.idOf(svc));
             if (svc.container.len > 0) c.eng.remove(svc.container);
         }
+        const p = try c.store.loadProject(name);
+        for (p.environments) |e| (try varsFor(c)).dropEnvironment(name, e);
         c.store.removeProject(name);
         c.store.syncRoutes();
     } else {
@@ -599,7 +665,7 @@ fn cmdEnv(c: *Ctx, args: []const [:0]const u8) !void {
     const n = name orelse die("usage: pharbor env create|rm NAME", .{});
     checkName(n);
     if (eql(verb, "create")) {
-        const copied = try deploy.duplicateEnvironment(c.store, scope.project, from, n);
+        const copied = try deploy.duplicateEnvironment(c.store, try varsFor(c), scope.project, from, n);
         sys.print("Created {s} with {d} services from {s}\n", .{ n, copied, from });
     } else if (eql(verb, "rm")) {
         if (eql(n, store_mod.default_environment)) die("the production environment cannot be removed", .{});
@@ -609,6 +675,7 @@ fn cmdEnv(c: *Ctx, args: []const [:0]const u8) !void {
             c.store.remove(c.store.idOf(svc));
             if (svc.container.len > 0) c.eng.remove(svc.container);
         }
+        (try varsFor(c)).dropEnvironment(scope.project, n);
         var p = try c.store.loadProject(scope.project);
         var kept: std.ArrayList([]const u8) = .empty;
         for (p.environments) |e| {
