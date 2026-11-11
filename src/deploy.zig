@@ -14,6 +14,7 @@ const detect = @import("detect.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
+const alerts = @import("alerts.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Deployment = store_mod.Deployment;
@@ -270,9 +271,30 @@ pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts
         record.reason = explain(e);
         record.finished_at = nowS();
         store.saveDeployment(id, record) catch {};
+        alerts.notify(a, store, vars.key, opts.io, .{
+            .kind = "deploy_failed",
+            .title = std.fmt.allocPrint(a, "{s} failed to deploy", .{svc.name}) catch "A deploy failed",
+            .detail = std.fmt.allocPrint(a, "Deployment #{d}: {s}. The previous version keeps running.", .{ number, explain(e) }) catch "",
+            .project = svc.project,
+            .environment = svc.environment,
+            .service = svc.name,
+        });
         if (!opts.echo) return;
         return error.DeployFailed;
     };
+    alerts.notify(a, store, vars.key, opts.io, .{
+        .kind = "deploy_succeeded",
+        .title = std.fmt.allocPrint(a, "{s} deployed", .{svc.name}) catch "A deploy succeeded",
+        .detail = std.fmt.allocPrint(a, "Deployment #{d} is live{s}{s}.", .{
+            number,
+            if (record.message.len > 0) ": " else "",
+            record.message,
+        }) catch "",
+        .project = svc.project,
+        .environment = svc.environment,
+        .service = svc.name,
+        .severity = .info,
+    });
 }
 
 fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *Service, record: *Deployment, log: Log, opts: RunOptions) !void {

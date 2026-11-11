@@ -17,6 +17,7 @@ const scheduler = @import("scheduler.zig");
 const metrics = @import("metrics.zig");
 const ws = @import("ws.zig");
 const terminal = @import("terminal.zig");
+const alerts = @import("alerts.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -175,6 +176,7 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "github")) return githubSettings(c, seg[1..]);
     if (eql(seg[0], "registries")) return registries(c, seg[1..]);
     if (eql(seg[0], "tunnel")) return tunnelApi(c, seg[1..]);
+    if (eql(seg[0], "alerts")) return alertsApi(c, seg[1..]);
     c.res.fail(404, "not found");
 }
 
@@ -1004,6 +1006,173 @@ fn tunnelApi(c: *Ctx, seg: []const []const u8) !void {
     if (seg.len == 0 and method(c, "DELETE")) {
         _ = try runSelf(c, &.{ "tunnel", "stop" });
         return c.res.json(200, .{ .ok = true });
+    }
+    c.res.fail(404, "not found");
+}
+
+const ChannelView = struct {
+    id: []const u8,
+    name: []const u8,
+    kind: alerts.Kind,
+    events: []const []const u8,
+    projects: []const []const u8,
+    enabled: bool,
+    email_from: []const u8,
+    email_to: []const []const u8,
+    signed: bool,
+    /// Enough of the address to recognise it, not to use it.
+    target: []const u8,
+};
+
+fn channelView(c: *Ctx, ch: alerts.Channel) ChannelView {
+    const plain = crypto.open(c.a, c.panel.key, ch.target) catch "";
+    var hint: []const u8 = "";
+    if (ch.kind == .email) {
+        hint = if (plain.len > 8) std.fmt.allocPrint(c.a, "{s}...{s}", .{ plain[0..3], plain[plain.len - 4 ..] }) catch "" else "";
+    } else if (std.Uri.parse(plain)) |uri| {
+        const host = if (uri.host) |h| h.percent_encoded else "";
+        hint = std.fmt.allocPrint(c.a, "{s}/...{s}", .{ host, plain[plain.len -| 4..] }) catch "";
+    } else |_| {}
+    return .{
+        .id = ch.id,
+        .name = ch.name,
+        .kind = ch.kind,
+        .events = ch.events,
+        .projects = ch.projects,
+        .enabled = ch.enabled,
+        .email_from = ch.email_from,
+        .email_to = ch.email_to,
+        .signed = ch.signing.len > 0,
+        .target = hint,
+    };
+}
+
+fn alertsApi(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 0 and method(c, "GET")) {
+        const cfg = alerts.load(c.store);
+        var views: std.ArrayList(ChannelView) = .empty;
+        for (cfg.channels) |ch| try views.append(c.a, channelView(c, ch));
+        return c.res.json(200, .{ .channels = views.items, .thresholds = cfg.thresholds, .events = alerts.event_kinds, .defaults = alerts.default_events });
+    }
+    if (seg.len == 1 and eql(seg[0], "log") and method(c, "GET")) {
+        const data = sys.readFileAlloc(c.a, alerts.logPath(c.store), 1 << 20) catch "";
+        var out: std.ArrayList(alerts.Delivery) = .empty;
+        var lines = std.mem.splitBackwardsScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            if (out.items.len == 50) break;
+            const d = std.json.parseFromSliceLeaky(alerts.Delivery, c.a, line, .{ .ignore_unknown_fields = true }) catch continue;
+            try out.append(c.a, d);
+        }
+        return c.res.json(200, out.items);
+    }
+    if (seg.len == 1 and eql(seg[0], "thresholds") and method(c, "PUT")) {
+        const body = c.req.json(alerts.Thresholds) catch return c.res.fail(400, "send cpu_percent, memory_mb and disk_mb");
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        var cfg = alerts.load(c.store);
+        cfg.thresholds = body;
+        try alerts.save(c.store, cfg);
+        return c.res.json(200, cfg.thresholds);
+    }
+    if (seg.len == 1 and eql(seg[0], "channels") and method(c, "POST")) {
+        const In = struct {
+            name: []const u8,
+            kind: alerts.Kind,
+            /// The webhook URL, or the Resend API key for email.
+            target: []const u8,
+            signing: []const u8 = "",
+            email_from: []const u8 = "",
+            email_to: []const []const u8 = &.{},
+            events: ?[]const []const u8 = null,
+            projects: []const []const u8 = &.{},
+        };
+        const body = c.req.json(In) catch return c.res.fail(400, "send name, kind and target");
+        const target = std.mem.trim(u8, body.target, " ");
+        if (std.mem.trim(u8, body.name, " ").len == 0) return c.res.fail(400, "give the channel a name");
+        if (!alerts.validTarget(body.kind, target)) return c.res.fail(400, switch (body.kind) {
+            .discord => "use the webhook URL from the Discord channel's Integrations settings",
+            .slack => "use an incoming webhook URL from hooks.slack.com",
+            .webhook => "use an http:// or https:// URL",
+            .email => "paste the Resend API key",
+        });
+        if (body.kind == .email) {
+            if (body.email_from.len == 0 or body.email_to.len == 0) return c.res.fail(400, "email needs a sender and at least one recipient");
+            for (body.email_to) |to| if (std.mem.indexOfScalar(u8, to, '@') == null) return c.res.fail(400, "a recipient is not an email address");
+        }
+        const events = body.events orelse &alerts.default_events;
+        for (events) |e| if (!alerts.knownEvent(e)) return c.res.fail(400, "unknown event");
+        var raw: [8]u8 = undefined;
+        crypto.random(&raw);
+        const ch: alerts.Channel = .{
+            .id = try crypto.hex(c.a, &raw),
+            .name = std.mem.trim(u8, body.name, " "),
+            .kind = body.kind,
+            .target = try crypto.seal(c.a, c.panel.key, target),
+            .signing = if (body.signing.len > 0) try crypto.seal(c.a, c.panel.key, body.signing) else "",
+            .email_from = body.email_from,
+            .email_to = body.email_to,
+            .events = events,
+            .projects = body.projects,
+        };
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        var cfg = alerts.load(c.store);
+        var list: std.ArrayList(alerts.Channel) = .empty;
+        try list.appendSlice(c.a, cfg.channels);
+        try list.append(c.a, ch);
+        cfg.channels = list.items;
+        try alerts.save(c.store, cfg);
+        return c.res.json(201, channelView(c, ch));
+    }
+    if (seg.len >= 2 and eql(seg[0], "channels")) {
+        const id = seg[1];
+        var cfg = alerts.load(c.store);
+        var index: ?usize = null;
+        for (cfg.channels, 0..) |ch, i| {
+            if (eql(ch.id, id)) index = i;
+        }
+        const i = index orelse return c.res.fail(404, "no such channel");
+        if (seg.len == 3 and eql(seg[2], "test") and method(c, "POST")) {
+            const ch = cfg.channels[i];
+            const ev: alerts.Event = .{
+                .kind = "test",
+                .title = "Test alert from PocketHarbor",
+                .detail = "If you can read this, the channel works.",
+                .severity = .info,
+                .at = nowS(),
+            };
+            const failure = alerts.deliver(c.a, c.panel.io, c.panel.key, ch, ev);
+            return c.res.json(200, .{ .ok = failure == null, .@"error" = failure orelse "" });
+        }
+        if (seg.len != 2) return c.res.fail(404, "not found");
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        cfg = alerts.load(c.store);
+        var list: std.ArrayList(alerts.Channel) = .empty;
+        try list.appendSlice(c.a, cfg.channels);
+        if (i >= list.items.len or !eql(list.items[i].id, id)) return c.res.fail(409, "the channels changed; try again");
+        if (method(c, "DELETE")) {
+            _ = list.orderedRemove(i);
+            cfg.channels = list.items;
+            try alerts.save(c.store, cfg);
+            return c.res.json(200, .{ .ok = true });
+        }
+        if (method(c, "PATCH")) {
+            const In = struct { name: ?[]const u8 = null, enabled: ?bool = null, events: ?[]const []const u8 = null, projects: ?[]const []const u8 = null };
+            const body = c.req.json(In) catch return c.res.fail(400, "invalid channel");
+            var ch = &list.items[i];
+            if (body.name) |n| ch.name = n;
+            if (body.enabled) |e| ch.enabled = e;
+            if (body.events) |evs| {
+                for (evs) |e| if (!alerts.knownEvent(e)) return c.res.fail(400, "unknown event");
+                ch.events = evs;
+            }
+            if (body.projects) |p| ch.projects = p;
+            cfg.channels = list.items;
+            try alerts.save(c.store, cfg);
+            return c.res.json(200, channelView(c, ch.*));
+        }
+        return c.res.fail(405, "method not allowed");
     }
     c.res.fail(404, "not found");
 }
