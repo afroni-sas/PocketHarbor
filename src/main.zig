@@ -28,7 +28,7 @@ const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
 const linux = sys.linux;
 
-const version = "0.1.0";
+const version = @import("version.zig").version;
 
 const usage =
     \\PocketHarbor: deploy and serve applications from an Android phone.
@@ -37,7 +37,7 @@ const usage =
     \\
     \\Serving
     \\  serve [-d] [--listen [ADDR:]PORT]  Run the HTTP proxy (default 0.0.0.0:8080)
-    \\  install                            Start the proxy when the phone boots (Termux:Boot)
+    \\  install [--listen [ADDR:]PORT]     Start the proxy when the phone boots (Termux:Boot)
     \\
     \\Services
     \\  deploy NAME [options]              Deploy a new version without downtime
@@ -89,6 +89,7 @@ const usage =
     \\  domain rm NAME HOSTNAME
     \\  domain ls
     \\  domain base [DOMAIN|--clear]       Give every service NAME.DOMAIN
+    \\  domain panel [HOST|--clear]        Where the dashboard answers, besides the phone's address
     \\
     \\Variables (encrypted; values may use ${{ KEY }}, ${{ shared.KEY }}, ${{ svc.KEY }})
     \\  var ls NAME | var ls --shared
@@ -748,7 +749,19 @@ fn cmdToken(c: *Ctx, args: []const [:0]const u8) !void {
 }
 
 /// Writes the Termux:Boot script that starts the proxy with the phone.
-fn cmdInstall(c: *Ctx, _: []const [:0]const u8) !void {
+fn cmdInstall(c: *Ctx, args: []const [:0]const u8) !void {
+    // `serve` remembers the port; the address is given again at each start.
+    var listen: []const u8 = "";
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const o: []const u8 = args[i];
+        if (eql(o, "--listen")) {
+            listen = value(args, &i);
+            _ = net.parseAddr(listen) catch die("invalid address", .{});
+        } else {
+            die("unknown option \"{s}\" for install", .{o});
+        }
+    }
     const prefix = c.env.get("PREFIX") orelse "";
     const home = c.env.get("HOME") orelse "";
     if (std.mem.indexOf(u8, prefix, "com.termux") == null or home.len < 2) {
@@ -763,9 +776,9 @@ fn cmdInstall(c: *Ctx, _: []const [:0]const u8) !void {
         \\# Written by `pharbor install`.
         \\export PHARBOR_ROOT='{s}'
         \\export PDOCK_BIN='{s}'
-        \\exec '{s}' serve -d
+        \\exec '{s}' serve -d{s}{s}
         \\
-    , .{ prefix, c.store.root, c.eng.bin, exe });
+    , .{ prefix, c.store.root, c.eng.bin, exe, if (listen.len > 0) " --listen " else "", listen });
     const path = try std.fmt.allocPrint(c.a, "{s}/pocketharbor", .{dir});
     try sys.writeFile(path, script, 0o700);
     var p = try sys.Path.of(path);
@@ -1129,8 +1142,26 @@ fn cmdLogs(c: *Ctx, args: []const [:0]const u8) !void {
 }
 
 fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
-    if (args.len == 0) die("usage: pharbor domain add|rm|ls|base", .{});
+    if (args.len == 0) die("usage: pharbor domain add|rm|ls|base|panel", .{});
     const verb: []const u8 = args[0];
+    if (eql(verb, "panel")) {
+        var s = c.store.settings();
+        if (args.len == 1) {
+            sys.print("{s}\n", .{s.panel_domain});
+            return;
+        }
+        if (eql(args[1], "--clear")) {
+            s.panel_domain = "";
+        } else {
+            checkDomain(args[1]);
+            s.panel_domain = args[1];
+        }
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        try c.store.saveSettings(s);
+        c.store.syncRoutes();
+        return;
+    }
     if (eql(verb, "ls")) {
         const s = c.store.settings();
         if (s.base_domain.len > 0) sys.print("base: {s}\n", .{s.base_domain});

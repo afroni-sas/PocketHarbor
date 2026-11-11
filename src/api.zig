@@ -164,7 +164,7 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "login") and method(c, "POST")) return login(c);
     if (eql(seg[0], "logout") and method(c, "POST")) return logout(c);
     if (eql(seg[0], "status") and method(c, "GET")) {
-        return c.res.json(200, .{ .setup_needed = c.auth.users().len == 0, .version = "0.1.0" });
+        return c.res.json(200, .{ .setup_needed = c.auth.users().len == 0, .version = @import("version.zig").version });
     }
 
     if (!authenticate(c)) return c.res.fail(401, "sign in first");
