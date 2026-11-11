@@ -99,6 +99,48 @@ pub const Engine = struct {
         return exitCode(status);
     }
 
+    /// Runs `pdock` with `input` on its stdin, for secrets that must not
+    /// appear in a process listing. Returns what it printed.
+    pub fn outputWithInput(self: *Engine, args: []const []const u8, input: []const u8) !Output {
+        const argv = try self.argvZ(args);
+        var in_pipe: [2]i32 = undefined;
+        var out_pipe: [2]i32 = undefined;
+        _ = try sys.ck(linux.pipe2(&in_pipe, .{ .CLOEXEC = true }));
+        _ = try sys.ck(linux.pipe2(&out_pipe, .{ .CLOEXEC = true }));
+        const pid = try sys.fork();
+        if (pid == 0) {
+            _ = linux.dup2(in_pipe[0], 0);
+            _ = linux.dup2(out_pipe[1], 1);
+            _ = linux.dup2(out_pipe[1], 2);
+            _ = linux.execve(self.bin.ptr, argv.ptr, self.envp);
+            linux.exit_group(127);
+        }
+        sys.close(in_pipe[0]);
+        sys.close(out_pipe[1]);
+        sys.writeAll(in_pipe[1], input) catch {};
+        sys.close(in_pipe[1]);
+        defer sys.close(out_pipe[0]);
+        var text: std.ArrayList(u8) = .empty;
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = sys.read(out_pipe[0], &buf) catch break;
+            if (n == 0) break;
+            try text.appendSlice(self.a, buf[0..n]);
+        }
+        var status: i32 = 0;
+        _ = linux.waitpid(pid, &status, 0);
+        return .{ .code = exitCode(status), .text = text.items };
+    }
+
+    pub fn registries(self: *Engine) []const []const u8 {
+        const out = self.output(&.{ "login", "--list" }) catch return &.{};
+        if (out.code != 0) return &.{};
+        var list: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.tokenizeScalar(u8, out.text, '\n');
+        while (it.next()) |h| list.append(self.a, h) catch break;
+        return list.items;
+    }
+
     /// Runs `pdock` and returns what it printed.
     pub fn output(self: *Engine, args: []const []const u8) !Output {
         const argv = try self.argvZ(args);

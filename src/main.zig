@@ -78,6 +78,10 @@ const usage =
     \\  var set NAME KEY=VALUE... | var set --shared KEY=VALUE...
     \\  var unset NAME KEY... | var import NAME FILE.env
     \\
+    \\Private registries (for images such as ghcr.io/you/app)
+    \\  registry login HOST -u USER      Reads the password or token from stdin
+    \\  registry ls | logout HOST
+    \\
     \\GitHub
     \\  github token TOKEN|--clear         For private repositories
     \\  github webhook                     The secret to give GitHub, for deploys on push
@@ -176,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "token", cmdToken },
         .{ "var", cmdVar },
         .{ "github", cmdGithub },
+        .{ "registry", cmdRegistry },
     };
     inline for (commands) |c| {
         if (eql(cmd, c[0])) {
@@ -425,6 +430,26 @@ fn cmdVar(c: *Ctx, args: []const [:0]const u8) !void {
     const current = try vars.get(scope.project, scope.environment, service);
     vars.put(scope.project, scope.environment, service, try vars_mod.merge(c.a, current, set.items, unset.items)) catch |e| die("{s}", .{@errorName(e)});
     sys.print("Saved. Deploy for the change to take effect.\n", .{});
+}
+
+fn cmdRegistry(c: *Ctx, args: []const [:0]const u8) !void {
+    const usage_line = "usage: pharbor registry login HOST -u USER | ls | logout HOST";
+    if (args.len == 0) die(usage_line, .{});
+    if (eql(args[0], "ls")) {
+        for (c.eng.registries()) |h| sys.print("{s}\n", .{h});
+        return;
+    }
+    if (eql(args[0], "logout") and args.len == 2) {
+        linux.exit_group(try c.eng.run(&.{ "logout", args[1] }));
+    }
+    if (eql(args[0], "login") and args.len == 4 and eql(args[2], "-u")) {
+        sys.eprint("Password or token: ", .{});
+        const secret = try readSecretLine(c);
+        const out = try c.eng.outputWithInput(&.{ "login", args[1], "-u", args[3], "--password-stdin" }, secret);
+        sys.print("{s}", .{out.text});
+        linux.exit_group(out.code);
+    }
+    die(usage_line, .{});
 }
 
 fn cmdGithub(c: *Ctx, args: []const [:0]const u8) !void {
