@@ -2,7 +2,7 @@
 // rows with reveal, inline add and edit, and a raw .env editor.
 
 import { signal } from '@preact/signals'
-import { ChevronDown, ChevronRight, Copy, EllipsisVertical, Eye, EyeOff, FileText, Pencil, Plus, Trash, TriangleExclamationPoint } from 'lucide-preact'
+import { Braces, ChevronDown, ChevronRight, Copy, CornerDownRight, EllipsisVertical, Eye, EyeOff, FileText, Pencil, Plug, Plus, Search, Trash, TriangleExclamationPoint } from 'lucide-preact'
 import { get, patch, post } from '../api.js'
 import { toast } from '../state.js'
 import { copy, openForm, openMenu, Spinner } from '../ui.jsx'
@@ -20,6 +20,8 @@ export async function loadVars(base, withResolved) {
     revealed.value = {}
     adding.value = false
     editing.value = ''
+    searching.value = false
+    needle.value = ''
   }
   try {
     const [list, res] = await Promise.all([get(base), withResolved ? get(`${base}?resolved=1`).catch(() => null) : null])
@@ -125,42 +127,63 @@ function Row({ base, v, resolved, onChange }) {
   const menu = (e) =>
     openMenu(e.currentTarget, [
       ['Copy value', Copy, () => copy(final ?? v.value)],
+      ['Copy name', Copy, () => copy(v.name)],
       ['Edit', Pencil, () => (editing.value = v.name)],
       null,
       ['Delete', Trash, () => change(base, { unset: [v.name] }, onChange, `Removed ${v.name}`), true],
     ])
   return (
     <div class="var-row">
+      <span class="var-icon" aria-hidden="true">
+        <Braces />
+      </span>
       <span class="name" title={v.name}>
         {v.name}
       </span>
-      <span class="val" onClick={toggle} title={open ? 'Hide' : 'Show'}>
-        {open ? (
-          <>
-            <Value text={v.value} />
-            {final !== undefined && final !== v.value && <span class="muted"> → {final}</span>}
-          </>
-        ) : (
-          '*******'
-        )}
+      <span class="val-cell">
+        <span class={`val${open ? ' open' : ''}`} onClick={toggle} title={open ? 'Hide' : 'Show'}>
+          {open ? (
+            <>
+              <Value text={v.value} />
+              {final !== undefined && final !== v.value && <span class="muted"> → {final}</span>}
+            </>
+          ) : (
+            '*******'
+          )}
+        </span>
+        <span class="var-hover">
+          <button class="btn ghost icon sm" aria-label={open ? 'Hide value' : 'Show value'} title={open ? 'Hide' : 'Show'} onClick={toggle}>
+            {open ? <EyeOff /> : <Eye />}
+          </button>
+          <button class="btn ghost icon sm" aria-label="Copy value" title="Copy" onClick={() => copy(final ?? v.value)}>
+            <Copy />
+          </button>
+        </span>
       </span>
-      <span class="row" style="gap:2px">
-        <button class="btn ghost icon sm" aria-label={open ? 'Hide value' : 'Show value'} onClick={toggle}>
-          {open ? <EyeOff /> : <Eye />}
-        </button>
-        <button class="btn ghost icon sm" aria-label="Variable menu" onClick={menu}>
-          <EllipsisVertical />
-        </button>
-      </span>
+      <button class="btn ghost icon sm" aria-label="Variable menu" onClick={menu}>
+        <EllipsisVertical />
+      </button>
     </div>
   )
 }
 
+const searching = signal(false)
+const needle = signal('')
+
+/** A reference added as a variable: NAME=${{ service.NAME }}. */
+function addReference(base, list, name, value, onChange) {
+  let key = name
+  for (let i = 2; list.some((v) => v.name === key); i++) key = `${name}_${i}`
+  change(base, { set: [{ name: key, value }] }, onChange, `Added ${key}`)
+}
+
 /**
  * `base` is the API path of the variables; `onChange` runs after a change
- * (a service marks itself as needing a deploy).
+ * (a service marks itself as needing a deploy). `shared` lists the
+ * environment's shared variables and `databases` the connection variables
+ * of its databases, for the references a service can add.
  */
-export function VariablesEditor({ base, title, hint, onChange }) {
+export function VariablesEditor({ base, title, hint, onChange, shared, databases }) {
   const state = vars.value
   if (state.base !== base || !state.list) {
     return (
@@ -173,21 +196,64 @@ export function VariablesEditor({ base, title, hint, onChange }) {
   const resolved = state.resolved ? Object.fromEntries(state.resolved.map((v) => [v.name, v.value])) : null
   const own = new Set(list.map((v) => v.name))
   const builtins = state.resolved ? state.resolved.filter((v) => v.name.startsWith('PHARBOR_') && !own.has(v.name)) : []
+  const q = needle.value.trim().toLowerCase()
+  const shown = q ? list.filter((v) => v.name.toLowerCase().includes(q)) : list
+  // Databases of the environment that this service does not use yet.
+  const unused = (databases || []).filter((d) => !list.some((v) => v.value.includes(`\${{ ${d.service}.`) || v.value.includes(`\${{${d.service}.`)))
+  const sharedMenu = (e) =>
+    openMenu(
+      e.currentTarget,
+      shared && shared.length
+        ? ['Reference a shared variable', ...shared.map((v) => [v.name, Braces, () => addReference(base, list, v.name, `\${{ shared.${v.name} }}`, onChange)])]
+        : ['No shared variables yet: add them in the project settings'],
+    )
+  const dbMenu = (e) =>
+    openMenu(e.currentTarget, ['Connect to', ...unused.map((d) => [`${d.service}: ${d.variable}`, Braces, () => addReference(base, list, d.variable, `\${{ ${d.service}.${d.variable} }}`, onChange)])])
   return (
     <div>
-      <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
-        <b style="font-size:14px">
+      <div class="var-head">
+        <b>
           {list.length} {title}
         </b>
+        {searching.value ? (
+          <input
+            class="input var-search"
+            placeholder="Filter variables"
+            value={needle.value}
+            onInput={(e) => (needle.value = e.currentTarget.value)}
+            onKeyDown={(e) => e.key === 'Escape' && ((needle.value = ''), (searching.value = false))}
+            autofocus
+          />
+        ) : (
+          <button class="btn ghost icon sm" aria-label="Filter variables" title="Filter" onClick={() => (searching.value = true)}>
+            <Search />
+          </button>
+        )}
         <span class="spacer" />
-        <button class="btn sm" onClick={() => rawEditor(base, list, onChange)}>
-          <FileText /> Raw Editor
+        {shared && (
+          <button class="btn ghost sm link" onClick={sharedMenu}>
+            <CornerDownRight /> Shared Variable
+          </button>
+        )}
+        <button class="btn ghost sm link" onClick={() => rawEditor(base, list, onChange)}>
+          <Braces /> Raw Editor
         </button>
-        <button class="btn sm primary" onClick={() => ((adding.value = true), (editing.value = ''))}>
+        <button class="btn sm outline" onClick={() => ((adding.value = true), (editing.value = ''))}>
           <Plus /> New Variable
         </button>
       </div>
-      {hint && <p class="muted small" style="margin:0 0 12px">{hint}</p>}
+      {hint && <p class="muted small" style="margin:0 0 14px">{hint}</p>}
+      {unused.length > 0 && (
+        <div class="banner suggest">
+          <Plug width={15} height={15} />
+          <span>
+            Trying to connect a database?{' '}
+            <button class="linkish" onClick={dbMenu}>
+              Add Variable
+            </button>
+          </span>
+        </div>
+      )}
       {state.warnings.map((w) => (
         <div class="banner warn" key={w}>
           <TriangleExclamationPoint width={15} height={15} />
@@ -195,21 +261,34 @@ export function VariablesEditor({ base, title, hint, onChange }) {
         </div>
       ))}
       {adding.value && <AddRow base={base} onChange={onChange} />}
-      {list.length === 0 && !adding.value && <div class="empty small">No variables yet.</div>}
-      {list.map((v) =>
+      {list.length === 0 && !adding.value && (
+        <div class="card empty">
+          <p style="margin:0 0 12px">No variables yet.</p>
+          <button class="btn sm outline" onClick={() => (adding.value = true)}>
+            <Plus /> New Variable
+          </button>
+        </div>
+      )}
+      {q && shown.length === 0 && <div class="empty small">No variable matches “{needle.value}”.</div>}
+      {shown.map((v) =>
         editing.value === v.name ? <EditRow key={v.name} base={base} v={v} onChange={onChange} /> : <Row key={v.name} base={base} v={v} resolved={resolved} onChange={onChange} />,
       )}
       {builtins.length > 0 && (
         <>
-          <div class="history-head muted small" onClick={() => (showBuiltins.value = !showBuiltins.value)}>
+          <button class="history-head" onClick={() => (showBuiltins.value = !showBuiltins.value)} aria-expanded={showBuiltins.value}>
             {showBuiltins.value ? <ChevronDown width={14} height={14} /> : <ChevronRight width={14} height={14} />}
-            {builtins.length} variables added by PocketHarbor
-          </div>
+            <span class="small">{builtins.length} variables added by PocketHarbor</span>
+          </button>
           {showBuiltins.value &&
             builtins.map((v) => (
-              <div class="var-row" key={v.name}>
-                <span class="name muted">{v.name}</span>
-                <span class="val">{v.value}</span>
+              <div class="var-row builtin" key={v.name}>
+                <span class="var-icon" aria-hidden="true">
+                  <Braces />
+                </span>
+                <span class="name">{v.name}</span>
+                <span class="val-cell">
+                  <span class="val open">{v.value}</span>
+                </span>
                 <button class="btn ghost icon sm" aria-label="Copy value" onClick={() => copy(v.value)}>
                   <Copy />
                 </button>

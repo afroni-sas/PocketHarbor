@@ -1,18 +1,19 @@
 // The project canvas: service cards on a dotted plane that pans, zooms and
 // lets cards be dragged, with dashed arrows for variable references.
 
-import { signal } from '@preact/signals'
-import { Box, Database, Grid3x3, HardDrive, LayoutTemplate, Maximize, Package, Plus, Square, ZoomIn, ZoomOut } from 'lucide-preact'
+import { effect, signal } from '@preact/signals'
+import { Box, Database, Grid3x3, HardDrive, LayoutTemplate, Maximize, Package, Plus, Redo2, Square, Undo2, ZoomIn, ZoomOut } from 'lucide-preact'
 import { enc, get, patch, post } from '../api.js'
 import { closeOverlay, edges, overlay, services, toast } from '../state.js'
 import { closeService, openService, page, refresh } from '../project.js'
 import { attempt, GithubIcon, Modal, openForm, openMenu, ServiceIcon, Spinner, Status } from '../ui.jsx'
 
-const W = 260
-const H = 106
-const VOL = 36
-const GAP_X = 320
-const GAP_Y = 200
+// Railway's card: 288 by 144, and 48 more for each volume.
+const W = 288
+const H = 144
+const VOL = 48
+const GAP_X = 360
+const GAP_Y = 240
 
 const view = signal({ x: 0, y: 0, k: 1 })
 const grid = signal(true)
@@ -103,8 +104,7 @@ export function fit() {
     x1 = Math.max(x1, n.x + W)
     y1 = Math.max(y1, n.y + heightOf(n.svc))
   }
-  // Keep the right part clear when a service panel covers it.
-  const width = page.peek()?.service && rect.width > 760 ? rect.width * 0.38 : rect.width
+  const width = rect.width
   // On a phone, readable cards matter more than seeing all of them.
   const least = rect.width < 760 ? 0.55 : 0.25
   const k = Math.max(least, clampK(Math.min(1, (width - 120) / (x1 - x0), (rect.height - 160) / (y1 - y0))))
@@ -116,6 +116,9 @@ export function fit() {
     y: fitsY ? (rect.height - (y1 - y0) * k) / 2 - y0 * k : 64 - y0 * k,
     k,
   }
+  // A page opened on a service keeps that card in sight beside its panel.
+  const open = page.peek()?.service
+  if (open) reveal(open)
 }
 
 // Panning with one pointer, pinching with two.
@@ -147,7 +150,10 @@ function onPointerMove(e) {
   if (g.kind === 'pan') {
     const dx = e.clientX - g.x
     const dy = e.clientY - g.y
-    if (Math.abs(dx) + Math.abs(dy) > 3) g.moved = true
+    if (Math.abs(dx) + Math.abs(dy) > 3) {
+      g.moved = true
+      if (beforePanel) beforePanel.moved = true
+    }
     view.value = { ...g.v, x: g.v.x + dx, y: g.v.y + dy }
     return
   }
@@ -176,6 +182,7 @@ function onPointerUp(e) {
 
 function onWheel(e) {
   e.preventDefault()
+  if (beforePanel) beforePanel.moved = true
   const v = view.peek()
   if (e.ctrlKey || e.metaKey) zoomAt(e.clientX, e.clientY, v.k * Math.exp(-e.deltaY * 0.01))
   else view.value = { ...v, x: v.x - e.deltaX, y: v.y - e.deltaY }
@@ -216,10 +223,45 @@ function cardUp(e) {
   const y = grid.peek() ? Math.round(d.y / 20) * 20 : d.y
   // 0,0 means "not placed yet".
   if (x === 0 && y === 0) x = 20
-  moved[g.id] = { x, y, at: Date.now() }
-  services.value = [...services.peek()]
-  patch(`/services/${enc(g.id)}`, { x, y }).catch((err) => toast(err.message, 'error'))
+  history.value = { done: [...history.peek().done, { id: g.id, from: { x: g.x, y: g.y }, to: { x, y } }].slice(-50), undone: [] }
+  moveTo(g.id, x, y)
 }
+
+function moveTo(id, x, y) {
+  moved[id] = { x, y, at: Date.now() }
+  services.value = [...(services.peek() || [])]
+  patch(`/services/${enc(id)}`, { x, y }).catch((err) => toast(err.message, 'error'))
+}
+
+/** Card moves that can be undone, as on Railway's canvas. */
+const history = signal({ done: [], undone: [] })
+
+function undo() {
+  const h = history.peek()
+  const last = h.done[h.done.length - 1]
+  if (!last) return
+  history.value = { done: h.done.slice(0, -1), undone: [...h.undone, last] }
+  moveTo(last.id, last.from.x, last.from.y)
+}
+
+function redo() {
+  const h = history.peek()
+  const next = h.undone[h.undone.length - 1]
+  if (!next) return
+  history.value = { done: [...h.done, next], undone: h.undone.slice(0, -1) }
+  moveTo(next.id, next.to.x, next.to.y)
+}
+
+addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || !page.peek() || page.peek().view !== 'canvas') return
+  const t = e.target
+  if (t instanceof Element && t.closest('input, textarea, select, [contenteditable], .console')) return
+  const k = e.key.toLowerCase()
+  if (k === 'z' && !e.shiftKey) undo()
+  else if ((k === 'z' && e.shiftKey) || k === 'y') redo()
+  else return
+  e.preventDefault()
+})
 
 function Card({ node, selected, dragging }) {
   const { svc, x, y } = node
@@ -235,7 +277,7 @@ function Card({ node, selected, dragging }) {
     >
       <div class="body">
         <div class="name">
-          <ServiceIcon svc={svc} />
+          <ServiceIcon svc={svc} size={22} />
           <span>{svc.name}</span>
         </div>
         {host ? <div class="sub">{host}</div> : svc.hostnames.includes('*') ? <div class="sub">default service</div> : null}
@@ -253,50 +295,105 @@ function Card({ node, selected, dragging }) {
   )
 }
 
+/** Right angles with corners rounded by `r`, as Railway draws its arrows. */
+function stepPath(points, r = 5) {
+  let d = `M${points[0].x},${points[0].y}`
+  for (let i = 1; i < points.length - 1; i++) {
+    const [a, p, b] = [points[i - 1], points[i], points[i + 1]]
+    const k = Math.min(r, Math.hypot(p.x - a.x, p.y - a.y) / 2, Math.hypot(b.x - p.x, b.y - p.y) / 2)
+    const inX = p.x - Math.sign(p.x - a.x) * k
+    const inY = p.y - Math.sign(p.y - a.y) * k
+    const outX = p.x + Math.sign(b.x - p.x) * k
+    const outY = p.y + Math.sign(b.y - p.y) * k
+    d += ` L${inX},${inY} Q${p.x},${p.y} ${outX},${outY}`
+  }
+  const end = points[points.length - 1]
+  return `${d} L${end.x},${end.y}`
+}
+
+/** From the side of `a` that faces `b` to the side of `b` that faces `a`. */
+export function route(a, ha, b, hb, offset = 0) {
+  if (b.x >= a.x + W + 24 || b.x + W + 24 <= a.x) {
+    const right = b.x > a.x
+    const s = { x: right ? a.x + W : a.x, y: a.y + ha / 2 + offset }
+    const t = { x: right ? b.x : b.x + W, y: b.y + hb / 2 + offset }
+    if (Math.abs(s.y - t.y) < 1) return stepPath([s, { x: t.x, y: s.y }])
+    const mid = Math.round((s.x + t.x) / 2)
+    return stepPath([s, { x: mid, y: s.y }, { x: mid, y: t.y }, t])
+  }
+  const down = b.y > a.y
+  const s = { x: a.x + W / 2 + offset, y: down ? a.y + ha : a.y }
+  const t = { x: b.x + W / 2 + offset, y: down ? b.y : b.y + hb }
+  if (Math.abs(s.x - t.x) < 1) return stepPath([s, { x: s.x, y: t.y }])
+  const mid = Math.round((s.y + t.y) / 2)
+  return stepPath([s, { x: s.x, y: mid }, { x: t.x, y: mid }, t])
+}
+
 function Edges({ nodes }) {
   const at = {}
   for (const n of nodes) at[n.svc.name] = n
+  const all = edges.value
+  const both = new Set(all.map((e) => `${e.from}>${e.to}`))
   const paths = []
-  for (const { from, to } of edges.value) {
+  for (const { from, to } of all) {
     const a = at[from]
     const b = at[to]
     if (!a || !b) continue
-    const ha = heightOf(a.svc)
-    const hb = heightOf(b.svc)
-    let s
-    let t
-    let horizontal = true
-    if (b.x >= a.x + W + 20) {
-      s = { x: a.x + W, y: a.y + ha / 2 }
-      t = { x: b.x, y: b.y + hb / 2 }
-    } else if (b.x + W + 20 <= a.x) {
-      s = { x: a.x, y: a.y + ha / 2 }
-      t = { x: b.x + W, y: b.y + hb / 2 }
-    } else {
-      horizontal = false
-      const down = b.y > a.y
-      s = { x: a.x + W / 2, y: down ? a.y + ha : a.y }
-      t = { x: b.x + W / 2, y: down ? b.y : b.y + hb }
-    }
-    const span = horizontal ? t.x - s.x : t.y - s.y
-    const c = Math.max(40, Math.abs(span) / 2) * Math.sign(span || 1)
-    const d = horizontal
-      ? `M${s.x},${s.y} C${s.x + c},${s.y} ${t.x - c},${t.y} ${t.x},${t.y}`
-      : `M${s.x},${s.y} C${s.x},${s.y + c} ${t.x},${t.y - c} ${t.x},${t.y}`
-    paths.push(<path key={`${from}>${to}`} d={d} />)
+    // Two services that refer to each other get two arrows side by side.
+    const offset = both.has(`${to}>${from}`) ? (from < to ? -20 : 20) : 0
+    paths.push(<path key={`${from}>${to}`} d={route(a, heightOf(a.svc), b, heightOf(b.svc), offset)} />)
   }
   return (
     <svg class="edges" width="1" height="1" aria-hidden="true">
       <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M0,1 L9,5 L0,9" fill="none" stroke="hsl(246, 8%, 45%)" stroke-width="1.5" />
+        <marker id="arrowhead" markerWidth="24" markerHeight="24" viewBox="-10 -10 20 20" markerUnits="strokeWidth" orient="auto-start-reverse" refX="0" refY="0">
+          <polyline points="-5,-4 0,0 -5,4 -5,-4" stroke-linecap="round" stroke-linejoin="round" class="arrowhead" />
         </marker>
       </defs>
-      <g fill="none" stroke="hsl(246, 8%, 40%)" stroke-width="1.5" stroke-dasharray="6 5" marker-end="url(#arrow)">
+      <g class="edge-paths" marker-end="url(#arrowhead)">
         {paths}
       </g>
     </svg>
   )
+}
+
+/** The width the service panel leaves of the canvas. */
+function openWidth(rect) {
+  if (rect.width < 760) return rect.width
+  return rect.width - Math.min(904, rect.width * 0.67)
+}
+
+// Opening a service moves the canvas so that its card stays in sight beside
+// the panel; closing the panel puts the canvas back, unless it was moved.
+let beforePanel = null
+let shownService = ''
+effect(() => {
+  const p = page.value
+  const name = p && p.view === 'canvas' ? p.service || '' : ''
+  if (name === shownService) return
+  const was = shownService
+  shownService = name
+  if (!canvasEl) return
+  if (!name) {
+    if (beforePanel && !beforePanel.moved) view.value = beforePanel.view
+    beforePanel = null
+    return
+  }
+  if (!was) beforePanel = { view: view.peek(), moved: false }
+  reveal(name)
+})
+
+function reveal(name) {
+  const node = place(services.peek() || []).find((n) => n.svc.name === name)
+  if (!node || !canvasEl) return
+  const rect = canvasEl.getBoundingClientRect()
+  const room = openWidth(rect)
+  const v = view.peek()
+  const left = v.x + node.x * v.k
+  const right = left + W * v.k
+  if (rect.width >= 760 && left >= 24 && right <= room - 24) return
+  const cx = room / 2 - (node.x + W / 2) * v.k
+  view.value = { ...v, x: rect.width < 760 ? v.x : cx }
 }
 
 export function Canvas() {
@@ -369,10 +466,18 @@ export function CanvasOverlay() {
             <Maximize />
           </button>
         </div>
+        <div class="group">
+          <button title="Undo (Ctrl+Z)" aria-label="Undo" onClick={undo} disabled={history.value.done.length === 0}>
+            <Undo2 />
+          </button>
+          <button title="Redo (Ctrl+Shift+Z)" aria-label="Redo" onClick={redo} disabled={history.value.undone.length === 0}>
+            <Redo2 />
+          </button>
+        </div>
       </div>
       <div class="stage-actions">
-        <button class="btn" onClick={(e) => addMenu(e.currentTarget)}>
-          <Plus /> Create
+        <button class="btn add" onClick={(e) => addMenu(e.currentTarget)}>
+          <Plus /> Add
         </button>
       </div>
     </>
@@ -402,7 +507,7 @@ export async function createService(body) {
 
 const portOf = (text) => (text ? Number(text) : undefined)
 
-function addRepo() {
+export function addRepo() {
   openForm({
     title: 'Deploy a GitHub repository',
     submit: 'Deploy',
@@ -438,7 +543,7 @@ function addRepo() {
   })
 }
 
-function addImage() {
+export function addImage() {
   openForm({
     title: 'Deploy a Docker image',
     submit: 'Deploy',
@@ -463,7 +568,7 @@ function addImage() {
   })
 }
 
-function addEmpty() {
+export function addEmpty() {
   openForm({
     title: 'Empty service',
     submit: 'Create',
@@ -495,7 +600,7 @@ async function deployTemplate(t) {
 const titles = { database: 'Add a database', bucket: 'Add a bucket' }
 
 /** Databases, buckets, or every template. */
-async function chooseTemplate(category) {
+export async function chooseTemplate(category) {
   if (!templateList.peek()) {
     try {
       templateList.value = await get('/templates')

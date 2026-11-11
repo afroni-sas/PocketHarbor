@@ -3,6 +3,8 @@
 // series. One y-axis per chart; two measures get two charts.
 
 import { signal } from '@preact/signals'
+import { Check, ChevronDown, Clock } from 'lucide-preact'
+import { openMenu } from '../ui.jsx'
 
 /** Validated on the dark surface: one hue alone, or blue and orange together. */
 export const colors = { single: '#9085e9', first: '#3987e5', second: '#d95926' }
@@ -25,6 +27,8 @@ export function bytes(n) {
 }
 
 const small = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1))
+/** CPU as Railway shows it: 0.25 vCPU is a quarter of one core. */
+export const vcpu = (v) => `${v === 0 ? '0' : v >= 10 ? Math.round(v) : v >= 1 ? v.toFixed(1) : v.toFixed(2)} vCPU`
 export const percent = (v) => `${v >= 10 ? Math.round(v) : small(Math.round(v * 10) / 10)}%`
 export const count = (v) => (v >= 10000 ? `${(v / 1000).toFixed(v >= 100000 ? 0 : 1)}K` : v >= 10 ? Math.round(v).toLocaleString() : small(v))
 export const millis = (v) => (v >= 1000 ? `${(v / 1000).toFixed(1)} s` : v >= 10 ? `${Math.round(v)} ms` : `${small(v)} ms`)
@@ -76,7 +80,7 @@ function paths(points, value, x, y, step, area, height) {
  * `series`: [{ label, color, value(point) }]; `format` writes a value.
  * `from`, `to` and `step` come from the API, in seconds.
  */
-export function Chart({ id, title, series, points, format, from, to, step, height = 150, binary = false, summary }) {
+export function Chart({ id, title, series, points, format, from, to, step, height = 150, binary = false, summary, quiet }) {
   const range = to - from
   let max = 0
   for (const p of points) for (const s of series) max = Math.max(max, s.value(p) || 0)
@@ -128,9 +132,9 @@ export function Chart({ id, title, series, points, format, from, to, step, heigh
       )}
       <div class="chart-body">
         <div class="y-axis" style={`height:${height}px`}>
-          <span>{format(top)}</span>
-          <span>{format(top / 2)}</span>
-          <span>{format(0)}</span>
+          {[1, 0.75, 0.5, 0.25, 0].map((f) => (
+            <span key={f}>{format(top * f)}</span>
+          ))}
         </div>
         <div
           class="plot"
@@ -145,7 +149,7 @@ export function Chart({ id, title, series, points, format, from, to, step, heigh
           onKeyDown={key}
         >
           <svg viewBox={`0 0 ${W} ${height}`} preserveAspectRatio="none" width="100%" height={height} aria-hidden="true">
-            {[0, 0.5, 1].map((f) => (
+            {[0, 0.25, 0.5, 0.75, 1].map((f) => (
               <line key={f} x1="0" x2={W} y1={y(top * f)} y2={y(top * f)} class="grid" vector-effect="non-scaling-stroke" />
             ))}
             {drawn.map((s) => s.fills.map((d, i) => <path key={`f${s.label}${i}`} d={d} fill={s.color} fill-opacity="0.1" />))}
@@ -155,7 +159,11 @@ export function Chart({ id, title, series, points, format, from, to, step, heigh
               )),
             )}
           </svg>
-          {points.length === 0 && <div class="chart-empty">No samples in this range yet</div>}
+          {points.length === 0 ? (
+            <div class="chart-empty">No samples in this range yet</div>
+          ) : (
+            quiet && max === 0 && <div class="chart-empty">{quiet}</div>
+          )}
           {shown && (
             <>
               <div class="crosshair" style={`left:${left}%`} />
@@ -188,20 +196,24 @@ export function Chart({ id, title, series, points, format, from, to, step, heigh
 }
 
 export const ranges = [
-  [3600, '1h'],
-  [6 * 3600, '6h'],
-  [86400, '1d'],
-  [7 * 86400, '7d'],
+  [900, 'Last 15 minutes'],
+  [3600, 'Last hour'],
+  [6 * 3600, 'Last 6 hours'],
+  [86400, 'Last day'],
+  [7 * 86400, 'Last 7 days'],
 ]
 
+/** Railway's range button: a clock, the range, and a menu of the others. */
 export function RangePicker({ value, onChange }) {
+  const label = (ranges.find(([s]) => s === value) || ranges[1])[1]
   return (
-    <div class="segmented" role="radiogroup" aria-label="Time range">
-      {ranges.map(([seconds, label]) => (
-        <button key={seconds} role="radio" aria-checked={value === seconds} class={value === seconds ? 'on' : ''} onClick={() => onChange(seconds)}>
-          {label}
-        </button>
-      ))}
-    </div>
+    <button
+      class="btn sm range"
+      aria-label="Time range"
+      onClick={(e) => openMenu(e.currentTarget, ranges.map(([s, l]) => [l, s === value ? Check : null, () => onChange(s)]))}
+    >
+      <Clock /> {label}
+      <ChevronDown />
+    </button>
   )
 }

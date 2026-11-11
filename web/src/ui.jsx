@@ -1,7 +1,30 @@
 // Shared pieces: dialogs, menus, toasts, and how services look.
 
 import { signal } from '@preact/signals'
-import { Box, Clock, Database, Moon, X } from 'lucide-preact'
+import { Box, CircleCheck, CircleX, Clock, Moon, X } from 'lucide-preact'
+import {
+  siAlpinelinux,
+  siCaddy,
+  siGhost,
+  siGitea,
+  siGrafana,
+  siMariadb,
+  siMinio,
+  siMongodb,
+  siMysql,
+  siN8n,
+  siNatsdotio,
+  siNextcloud,
+  siNginx,
+  siNodedotjs,
+  siPostgresql,
+  siPython,
+  siRabbitmq,
+  siRedis,
+  siTraefikproxy,
+  siUptimekuma,
+  siWordpress,
+} from './brands.js'
 import { closeOverlay, overlay, toast, toasts } from './state.js'
 
 export function GithubIcon(props) {
@@ -12,52 +35,121 @@ export function GithubIcon(props) {
   )
 }
 
-const databases = [
-  [/postgres/, 'hsl(210, 60%, 62%)'],
-  [/mysql|mariadb/, 'hsl(200, 70%, 60%)'],
-  [/redis/, 'hsl(1, 70%, 60%)'],
-  [/mongo/, 'hsl(120, 45%, 55%)'],
-  [/minio/, 'hsl(350, 70%, 60%)'],
-  [/nats/, 'hsl(160, 60%, 50%)'],
+// Products by the name of their image, drawn with their own logo as Railway
+// does. The logos come from Simple Icons (CC0), through src/brands.js.
+const brands = [
+  [/^(postgres|postgis|timescaledb)/, siPostgresql],
+  [/^(redis|valkey)/, siRedis],
+  [/^mysql$/, siMysql],
+  [/^mariadb$/, siMariadb],
+  [/^mongo$/, siMongodb],
+  [/^minio$/, siMinio],
+  [/^nats$/, siNatsdotio],
+  [/^nginx/, siNginx],
+  [/^node$/, siNodedotjs],
+  [/^python$/, siPython],
+  [/^alpine$/, siAlpinelinux],
+  [/^caddy$/, siCaddy],
+  [/^grafana$/, siGrafana],
+  [/^rabbitmq$/, siRabbitmq],
+  [/^traefik$/, siTraefikproxy],
+  [/^n8n$/, siN8n],
+  [/^uptime-kuma$/, siUptimekuma],
+  [/^gitea$/, siGitea],
+  [/^nextcloud$/, siNextcloud],
+  [/^wordpress$/, siWordpress],
+  [/^ghost$/, siGhost],
 ]
 
-/** The icon and colour of a service, from what it runs. */
+/** "minio/minio:latest" → "minio": the name of the image, without owner or tag. */
+function imageName(image) {
+  const last = (image || '').toLowerCase().split('/').pop()
+  return last.split(/[:@]/)[0]
+}
+
+export function brandOf(svc) {
+  const name = imageName(svc.image)
+  if (!name) return null
+  for (const [re, icon] of brands) if (re.test(name)) return icon
+  return null
+}
+
+/** A brand colour too dark for the dark background is lightened, keeping its hue. */
+function readable(hex) {
+  const n = parseInt(hex, 16)
+  const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+  const light = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+  if (light >= 110) return `#${hex}`
+  // Black and near-grey logos become light grey; colours move halfway to white.
+  const grey = Math.max(...c) - Math.min(...c) < 24
+  const mix = grey ? 0.85 : light < 50 ? 0.6 : 0.45
+  return `rgb(${c.map((v) => Math.round(v + (255 - v) * mix)).join(',')})`
+}
+
+export function BrandIcon({ icon, size = 18 }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill={readable(icon.hex)} role="img" aria-label={icon.title}>
+      <path d={icon.path} />
+    </svg>
+  )
+}
+
+/** The icon of a service: its repository, its product, or what it is. */
 export function ServiceIcon({ svc, size = 18 }) {
   if (svc.repo) return <GithubIcon size={size} />
+  const brand = brandOf(svc)
+  if (brand) return <BrandIcon icon={brand} size={size} />
   if (svc.cron) return <Clock width={size} height={size} />
-  const image = (svc.image || '').toLowerCase()
-  for (const [re, color] of databases) {
-    if (re.test(image)) return <Database width={size} height={size} color={color} />
-  }
   return <Box width={size} height={size} />
 }
 
-/** What the card says about a service, and in which colour. */
+/** What the card says about a service: its words, colour and mark. */
 export function statusOf(svc) {
   const latest = svc.latest
-  if (latest && latest.status === 'deploying') return { label: latest.trigger === 'webhook' ? 'Building from a push' : 'Deploying', color: 'purple' }
+  if (latest && latest.status === 'deploying') {
+    return { label: latest.trigger === 'webhook' || svc.repo ? 'Building' : 'Deploying', color: 'purple', mark: 'spin' }
+  }
   if (svc.status === 'scheduled') {
     const last = svc.last_run
-    if (last && last.started_at && !last.finished_at) return { label: 'Running', color: 'purple' }
-    if (last && last.finished_at) return { label: last.exit_code === 0 ? 'Last run succeeded' : `Last run failed (${last.exit_code})`, color: last.exit_code === 0 ? 'green' : 'red' }
-    return { label: `Cron ${svc.cron}`, color: 'gray' }
+    if (last && last.started_at && !last.finished_at) return { label: 'Running', color: 'purple', mark: 'spin' }
+    if (last && last.finished_at) {
+      return last.exit_code === 0
+        ? { label: 'Completed', color: 'green', mark: 'check' }
+        : { label: `Failed (exit ${last.exit_code})`, color: 'red', mark: 'x' }
+    }
+    return { label: `Cron ${svc.cron}`, color: 'gray', mark: 'clock' }
   }
   switch (svc.status) {
-    case 'running': return { label: 'Online', color: 'green' }
-    case 'restarting': return { label: 'Restarting', color: 'yellow' }
-    case 'asleep': return { label: 'Sleeping', color: 'gray', icon: Moon }
-    case 'exited': return { label: 'Crashed', color: 'red' }
-    case 'failed': return { label: latest && latest.status === 'failed' ? 'Deploy failed' : 'Failed', color: 'red' }
-    case 'new': return { label: 'No deploys yet', color: 'gray' }
-    default: return { label: svc.status, color: 'gray' }
+    case 'running': return { label: 'Online', color: 'green', mark: 'dot' }
+    case 'restarting': return { label: 'Restarting', color: 'yellow', mark: 'spin' }
+    case 'asleep': return { label: 'Sleeping', color: 'gray', mark: 'moon' }
+    case 'exited': return { label: 'Crashed', color: 'red', mark: 'x' }
+    case 'failed': return { label: latest && latest.status === 'failed' ? 'Deploy failed' : 'Failed', color: 'red', mark: 'x' }
+    case 'new': return { label: 'No deployments', color: 'gray', mark: 'dot' }
+    default: return { label: svc.status, color: 'gray', mark: 'dot' }
   }
+}
+
+/** Railway's marks: a dot in a halo, a check, a cross, a spinner. */
+export function StatusMark({ mark, color }) {
+  if (mark === 'spin') return <span class={`status-spin ${color}`} aria-hidden="true" />
+  if (mark === 'check') return <CircleCheck class="status-icon" aria-hidden="true" />
+  if (mark === 'x') return <CircleX class="status-icon" aria-hidden="true" />
+  if (mark === 'moon') return <Moon class="status-icon" aria-hidden="true" />
+  if (mark === 'clock') return <Clock class="status-icon" aria-hidden="true" />
+  return (
+    <svg class="status-dot" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="3" />
+      <circle cx="8" cy="8" r="6.25" class="halo" />
+    </svg>
+  )
 }
 
 export function Status({ svc }) {
   const s = statusOf(svc)
   return (
     <span class={`status ${s.color}`}>
-      <span class={`dot ${s.color}`} />
+      <StatusMark mark={s.mark} color={s.color} />
       {s.label}
     </span>
   )

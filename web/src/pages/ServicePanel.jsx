@@ -10,7 +10,9 @@ import {
   CircleCheck,
   CircleX,
   Clock,
+  Code,
   Copy,
+  CornerDownRight,
   EllipsisVertical,
   ExternalLink,
   FileText,
@@ -18,6 +20,7 @@ import {
   Hammer,
   HardDrive,
   Network,
+  Pencil,
   Play,
   Plug,
   Plus,
@@ -25,6 +28,7 @@ import {
   Rocket,
   RotateCcw,
   Search,
+  Smartphone,
   Trash,
   TriangleExclamationPoint,
   Undo2,
@@ -33,7 +37,7 @@ import {
 import { del, enc, get, patch, post } from '../api.js'
 import { me, services, toast } from '../state.js'
 import { closeService, markDirty, page, privateName, refresh, serviceId, setQuery } from '../project.js'
-import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, size, Spinner, statusOf, timeAgo } from '../ui.jsx'
+import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, size, Spinner, StatusMark, statusOf, timeAgo } from '../ui.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { LogsView } from './Logs.jsx'
 import { MetricsTab } from './Metrics.jsx'
@@ -44,8 +48,10 @@ const deployments = signal({ id: '', list: null })
 const backups = signal({ id: '', volumes: null, list: null })
 const runs = signal({ id: '', log: null })
 const tunnel = signal(null)
+const sharedVars = signal([])
 const showHistory = signal(true)
 const filter = signal('')
+const editingImage = signal('')
 const backingUp = signal('')
 
 const current = computed(() => {
@@ -94,7 +100,14 @@ async function loadSettings(id) {
 
 const loaders = {
   deployments: [loadDeployments, 3000],
-  variables: [(id) => loadVars(`/services/${enc(id)}/variables`, true), 0],
+  variables: [
+    (id) => {
+      loadVars(`/services/${enc(id)}/variables`, true)
+      const [project, env] = id.split('.')
+      get(`/projects/${enc(project)}/environments/${enc(env)}/variables`).then((list) => (sharedVars.value = list), () => (sharedVars.value = []))
+    },
+    0,
+  ],
   backups: [loadBackups, 0],
   runs: [loadRuns, 4000],
   settings: [loadSettings, 0],
@@ -114,6 +127,14 @@ effect(() => {
 })
 
 addEventListener('keydown', (e) => {
+  if (e.key === '/' && !(e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable], .console'))) {
+    const el = document.getElementById('settings-filter')
+    if (el) {
+      e.preventDefault()
+      el.focus()
+    }
+    return
+  }
   if (e.key !== 'Escape' || e.defaultPrevented) return
   // Escape belongs to the program in the terminal (vim, less...).
   if (e.target instanceof Element && e.target.closest('.console')) return
@@ -216,60 +237,107 @@ async function deployNow(svc) {
   }, 'Deploying')
 }
 
-const triggers = { cli: 'CLI', api: 'dashboard', webhook: 'GitHub push', redeploy: 'redeploy', rollback: 'rollback' }
+/** Where a deployment came from, as Railway words it: "via GitHub". */
+function source(svc, d) {
+  if (d.trigger === 'cli') return 'CLI'
+  return svc.repo ? 'GitHub' : 'Docker'
+}
+
+const notes = { redeploy: 'redeploy', rollback: 'rollback', webhook: 'push' }
+
+function badgeOf(svc, d, active) {
+  if (active) return { label: 'Active', color: 'green' }
+  if (d.status === 'deploying') return { label: svc.repo ? 'Building' : 'Deploying', color: 'purple', spin: true }
+  if (d.status === 'failed') return { label: 'Failed', color: 'red' }
+  if (d.status === 'removed') return { label: 'Removed', color: 'gray' }
+  return { label: d.status, color: 'gray' }
+}
+
+const expanded = signal('')
+
+function seconds(n) {
+  if (n < 60) return `${n}s`
+  return `${Math.floor(n / 60)}m ${n % 60}s`
+}
 
 function DeployCard({ svc, d, active }) {
   const deploying = d.status === 'deploying'
   const failed = d.status === 'failed'
   const s = statusOf(svc)
+  const b = badgeOf(svc, d, active)
   const title = d.message || (svc.repo ? `${svc.repo}@${svc.branch}` : d.image || `Deployment #${d.number}`)
-  const took = d.finished_at && d.created_at ? ` · ${Math.max(1, d.finished_at - d.created_at)}s` : ''
+  const took = d.finished_at && d.created_at ? seconds(Math.max(1, d.finished_at - d.created_at)) : ''
+  const running = deploying ? seconds(Math.max(0, Math.round(Date.now() / 1000) - d.created_at)) : ''
+  const key = `${svc.id}#${d.number}`
+  const open = expanded.value === key
   const logs = () => setQuery({ logs: d.number, logtab: deploying || failed ? undefined : 'deploy' })
   const menu = (e) =>
     openMenu(e.currentTarget, [
       ['View logs', FileText, logs],
-      active && ['Restart', RotateCcw, () => attempt(() => post(svcPath(svc, '/restart')).then(refresh), 'Restarted')],
       active && ['Redeploy', RefreshCw, () => attempt(() => post(svcPath(svc, '/redeploy'), { number: d.number }).then(() => loadDeployments(svc.id)), 'Redeploying')],
+      active && [svc.repo ? 'Deploy the latest commit' : 'Pull the image again', Rocket, () => deployNow(svc)],
+      active && ['Restart', RotateCcw, () => attempt(() => post(svcPath(svc, '/restart')).then(refresh), 'Restarted')],
       !active && d.status === 'removed' && ['Rollback', Undo2, () => rollback(svc, d)],
+      !active && failed && ['Retry', RefreshCw, () => deployNow(svc)],
     ].filter(Boolean))
   return (
-    <div class={`deploy${active ? ' active' : ''}${failed ? ' failed' : ''}`}>
+    <div class={`deploy${active ? ' active' : ''}${failed ? ' failed' : ''}${deploying ? ' running' : ''}`}>
       <div class="main">
-        <span class="deploy-icon">{svc.repo ? <GithubIcon size={15} /> : <Box />}</span>
+        <span class={`deploy-badge ${b.color}`}>
+          {b.spin && <span class="status-spin" />}
+          {b.label}
+        </span>
+        <span class="deploy-avatar" aria-hidden="true">
+          {svc.repo ? <GithubIcon size={18} /> : <Box width={18} height={18} />}
+        </span>
         <div class="what">
           <b title={title}>{title}</b>
           <span>
-            {timeAgo(d.created_at)} via {triggers[d.trigger] || d.trigger}
+            <time title={new Date(d.created_at * 1000).toLocaleString()}>{timeAgo(d.created_at)}</time> via {source(svc, d)}
+            {notes[d.trigger] && ` (${notes[d.trigger]})`}
             {d.commit && <span class="mono"> · {d.commit}</span>}
-            {took}
+            {deploying && ` · ${running}`}
           </span>
         </div>
-        {active && <span class="badge green">Active</span>}
-        {deploying && (
-          <span class="badge purple">
-            <span class="spinner" style="width:10px;height:10px;margin-right:6px;border-width:1.5px" />
-            {svc.repo ? 'Building' : 'Deploying'}
-          </span>
-        )}
-        {failed && <span class="badge red">Failed</span>}
-        {d.status === 'removed' && <span class="badge">Removed</span>}
-        <button class="btn sm" onClick={logs}>
-          View logs
-        </button>
-        <button class="btn ghost icon sm" aria-label="Deployment menu" onClick={menu}>
-          <EllipsisVertical />
-        </button>
+        <div class="deploy-actions">
+          <button class="btn sm view-logs" onClick={logs}>
+            View logs
+          </button>
+          <button class="btn ghost icon sm" aria-label="Deployment actions" title="Deployment actions" onClick={menu}>
+            <EllipsisVertical />
+          </button>
+        </div>
       </div>
       {active && (
-        <div class="state">
-          {s.color === 'green' ? <CircleCheck width={15} height={15} color="var(--green)" /> : <span class={`dot ${s.color}`} />}
+        <button class="state" onClick={() => (expanded.value = open ? '' : key)} aria-expanded={open}>
+          {s.color === 'green' ? <CircleCheck width={15} height={15} /> : <StatusMark mark={s.mark} color={s.color} />}
           <span class={`status ${s.color}`}>{s.color === 'green' ? 'Deployment successful' : s.label}</span>
-        </div>
+          <span class="spacer" />
+          <ChevronDown width={16} height={16} class={`chevron${open ? ' open' : ''}`} />
+        </button>
+      )}
+      {active && open && (
+        <dl class="deploy-details">
+          <dt>Deployment</dt>
+          <dd>#{d.number}</dd>
+          <dt>Image</dt>
+          <dd class="mono">{d.image}</dd>
+          <dt>Container</dt>
+          <dd class="mono">{d.container}</dd>
+          <dt>Started</dt>
+          <dd>{new Date(d.created_at * 1000).toLocaleString()}</dd>
+          {took && (
+            <>
+              <dt>Took</dt>
+              <dd>{took}</dd>
+            </>
+          )}
+        </dl>
       )}
       {failed && d.reason && (
-        <div class="state">
-          <CircleX width={15} height={15} color="var(--red)" />
-          <span class="status red">{d.reason}</span>
+        <div class="state failed-reason">
+          <CircleX width={15} height={15} />
+          <span>{d.reason}</span>
         </div>
       )}
     </div>
@@ -336,28 +404,38 @@ function Deployments({ svc }) {
   const history = list.slice(split)
   return (
     <>
-      <div class="row" style="margin-bottom:14px;align-items:flex-start">
+      <div class="deploy-head">
         <Hosts svc={svc} />
         <span class="spacer" />
-        {connectVar(svc) && (
-          <button class="btn sm" onClick={() => showConnect(svc)}>
-            <Plug /> Connect
-          </button>
-        )}
-        <button class="btn sm primary" onClick={() => deployNow(svc)}>
-          <Rocket /> Deploy
-        </button>
+        <span class="deploy-facts">
+          <span title="Where it runs">
+            <Smartphone width={14} height={14} /> This phone
+          </span>
+          {svc.port > 0 && (
+            <span title="The port it listens on">
+              <Plug width={14} height={14} /> Port {svc.port}
+            </span>
+          )}
+        </span>
       </div>
-      {list.length === 0 && <div class="card empty">No deployments yet.</div>}
+      {list.length === 0 && (
+        <div class="card empty">
+          <p style="margin:0 0 14px">No deployments yet.</p>
+          <button class="btn primary" onClick={() => deployNow(svc)}>
+            <Rocket /> Deploy
+          </button>
+        </div>
+      )}
       {top.map((x) => (
         <DeployCard key={x.number} svc={svc} d={x} active={x.status === 'active'} />
       ))}
       {history.length > 0 && (
         <>
-          <div class="history-head section-title" onClick={() => (showHistory.value = !showHistory.value)}>
+          <button class="history-head" onClick={() => (showHistory.value = !showHistory.value)} aria-expanded={showHistory.value}>
             {showHistory.value ? <ChevronDown width={14} height={14} /> : <ChevronRight width={14} height={14} />}
-            History
-          </div>
+            <span class="section-title">History</span>
+            <span class="muted small">{history.length}</span>
+          </button>
           {showHistory.value && history.map((x) => <DeployCard key={x.number} svc={svc} d={x} active={false} />)}
         </>
       )}
@@ -539,13 +617,16 @@ function Section({ id, icon: Icon, title, keys, children }) {
 }
 
 /** A field saved when it loses focus or on Enter. */
-function Text({ svc, field, placeholder, live, number, mono = true }) {
+function Text({ svc, field, placeholder, live, number, mono = true, onDone, autofocus }) {
   const value = svc[field] ?? ''
   const save = (e) => {
     const raw = e.currentTarget.value.trim()
     const next = number ? (raw === '' ? 0 : Number(raw)) : raw
-    if (next === value || (number && Number.isNaN(next))) return
-    attempt(() => update(svc, { [field]: next }, live), 'Saved')
+    if (next === value || (number && Number.isNaN(next)) || (!number && field === 'image' && !next)) {
+      if (onDone) onDone()
+      return
+    }
+    attempt(() => update(svc, { [field]: next }, live), 'Saved').then(() => onDone && onDone())
   }
   return (
     <input
@@ -556,7 +637,11 @@ function Text({ svc, field, placeholder, live, number, mono = true }) {
       type={number ? 'number' : 'text'}
       spellcheck={false}
       onBlur={save}
-      onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        else if (e.key === 'Escape' && onDone) onDone()
+      }}
+      autofocus={autofocus}
     />
   )
 }
@@ -685,12 +770,20 @@ function Settings({ svc }) {
   return (
     <div class="settings">
       <div>
-        <div class="search" style="width:100%;margin-bottom:22px">
+        <div class="search filter" style="width:100%;margin-bottom:24px">
           <Search />
-          <input class="input" placeholder="Filter settings..." value={filter.value} onInput={(e) => (filter.value = e.currentTarget.value)} />
+          <input
+            class="input"
+            id="settings-filter"
+            placeholder="Filter settings..."
+            value={filter.value}
+            onInput={(e) => (filter.value = e.currentTarget.value)}
+            onKeyDown={(e) => e.key === 'Escape' && filter.value && (e.preventDefault(), (filter.value = ''))}
+          />
+          <kbd class="kbd">/</kbd>
         </div>
 
-        <Section id="source" icon={GithubIcon} title="Source" keys="repository image branch root directory auto deploy">
+        <Section id="source" icon={Code} title="Source" keys="repository image branch root directory auto deploy">
           {svc.repo ? (
             <>
               <Group label="Source Repo" keys="repository github">
@@ -719,8 +812,34 @@ function Settings({ svc }) {
               </Group>
             </>
           ) : svc.image ? (
-            <Group label="Source Image" hint="Pulled again on every deploy." keys="image docker registry">
-              <Text svc={svc} field="image" placeholder="nginx:alpine" />
+            <Group label="Source Image" keys="image docker registry">
+              {editingImage.value === svc.id ? (
+                <Text svc={svc} field="image" placeholder="nginx:alpine" autofocus onDone={() => (editingImage.value = '')} />
+              ) : (
+                <div class="source-card">
+                  <Box />
+                  <div class="what">
+                    <span class="mono">{svc.image}</span>
+                    <span class="muted small">Pulled again on every deploy</span>
+                  </div>
+                  <button class="btn ghost icon sm" aria-label="Change the image" title="Change the image" onClick={() => (editingImage.value = svc.id)}>
+                    <Pencil />
+                  </button>
+                  <button
+                    class="btn sm"
+                    onClick={() =>
+                      confirm({
+                        title: 'Disconnect the image?',
+                        body: 'The service keeps running until its next deploy, which then needs a new source.',
+                        action: 'Disconnect',
+                        onConfirm: () => update(svc, { image: '' }, true),
+                      })
+                    }
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
             </Group>
           ) : (
             <Group label="Source" hint="Where the service comes from." keys="repository image">
@@ -739,12 +858,35 @@ function Settings({ svc }) {
         <Section id="networking" icon={Network} title="Networking" keys="domain public private port tunnel">
           <Group label="Public Networking" hint="Where the service answers outside the phone." keys="domain public tunnel">
             {svc.hostnames.map((h) => (
-              <div class="domain-row" key={h}>
+              <div class="domain-card" key={h}>
                 <Globe />
-                <span class="mono">{h === '*' ? 'any other hostname (default service)' : h}</span>
-                <span class="spacer" />
+                <div class="what">
+                  {h === '*' ? <span>Any other hostname</span> : <a class="mono" href={`http://${h}`} target="_blank" rel="noreferrer">{h}</a>}
+                  <span class="muted small">
+                    <CornerDownRight width={12} height={12} /> Port {svc.port || 8080}
+                    {h === '*' && ' · the default service'}
+                    {svc.domains.includes(h) ? ' · custom domain' : h !== '*' ? ' · from the base domain' : ''}
+                  </span>
+                </div>
+                {h !== '*' && (
+                  <button class="btn ghost icon sm" aria-label={`Copy ${h}`} title="Copy" onClick={() => copy(h)}>
+                    <Copy />
+                  </button>
+                )}
                 {svc.domains.includes(h) && (
-                  <button class="btn ghost icon sm" aria-label={`Remove ${h}`} onClick={() => attempt(() => update(svc, { domains: svc.domains.filter((d) => d !== h) }, true), 'Domain removed')}>
+                  <button
+                    class="btn ghost icon sm"
+                    aria-label={`Remove ${h}`}
+                    title="Remove"
+                    onClick={() =>
+                      confirm({
+                        title: `Remove ${h}?`,
+                        body: 'The service stops answering at this hostname.',
+                        action: 'Remove',
+                        onConfirm: () => update(svc, { domains: svc.domains.filter((d) => d !== h) }, true),
+                      })
+                    }
+                  >
                     <Trash />
                   </button>
                 )}
@@ -933,10 +1075,15 @@ export function ServicePanel() {
       <aside class="panel" aria-label={svc.name}>
         <div class="panel-head">
           <div class="panel-title">
-            <ServiceIcon svc={svc} size={22} />
+            <ServiceIcon svc={svc} size={26} />
             <h2>{svc.name}</h2>
             <span class="spacer" />
-            <button class="btn ghost icon" aria-label="Close" onClick={closeService}>
+            {connectVar(svc) && (
+              <button class="btn sm" onClick={() => showConnect(svc)}>
+                <Plug /> Connect
+              </button>
+            )}
+            <button class="btn ghost icon" aria-label="Close" title="Close (Esc)" onClick={closeService}>
               <X />
             </button>
           </div>
@@ -954,6 +1101,8 @@ export function ServicePanel() {
           {tab === 'variables' && (
             <VariablesEditor
               base={`/services/${enc(svc.id)}/variables`}
+              shared={sharedVars.value}
+              databases={list.filter((o) => o.name !== svc.name && connectVar(o)).map((o) => ({ service: o.name, variable: connectVar(o) }))}
               title="Service Variables"
               hint={'Reference other services with ${{ name.VARIABLE }} and shared ones with ${{ shared.VARIABLE }}.'}
               onChange={() => markDirty(svc)}

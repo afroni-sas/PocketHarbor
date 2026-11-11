@@ -1,18 +1,21 @@
-// Logs of a whole environment: every service's output merged by time, with
-// a search done on the phone and a filter per service. Railway's Logs page.
+// Logs of a whole environment, as on Railway's Logs page: every service's
+// output merged by time, a histogram of the volume with errors in red, a
+// search done on the phone, a time range, and live updates.
 
 import { computed, effect, signal, untracked } from '@preact/signals'
-import { Pause, Play, Search } from 'lucide-preact'
+import { ArrowDown, ArrowUp, Download, Radio, Search } from 'lucide-preact'
 import { enc, get } from '../api.js'
 import { me, services } from '../state.js'
 import { openService, page } from '../project.js'
-import { Spinner } from '../ui.jsx'
+import { openMenu, Spinner } from '../ui.jsx'
+import { RangePicker } from './Chart.jsx'
 
 const query = signal('')
 /** What the server was asked: the search box, after a pause in typing. */
 const asked = signal('')
 const only = signal('')
 const live = signal(true)
+const range = signal(3600)
 const data = signal({ key: '', lines: null, error: '' })
 let el = null
 let stick = true
@@ -26,7 +29,7 @@ const key = computed(() => {
 
 async function load(k) {
   const [project, env, q, service] = k.split('\n')
-  const params = new URLSearchParams({ tail: q ? '2000' : '300' })
+  const params = new URLSearchParams({ tail: q ? '3000' : '1000' })
   if (q) params.set('q', q)
   if (service) params.set('service', service)
   try {
@@ -56,6 +59,15 @@ effect(() => {
   if (on) timer = setInterval(() => document.hidden || load(k), 3000)
 })
 
+addEventListener('keydown', (e) => {
+  if (e.key !== '/' || (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable], .console'))) return
+  const box = document.getElementById('logs-search')
+  if (box) {
+    e.preventDefault()
+    box.focus()
+  }
+})
+
 function onInput(e) {
   query.value = e.currentTarget.value
   clearTimeout(typing)
@@ -78,33 +90,92 @@ function Highlight({ text, q }) {
   return out
 }
 
-const level = (line) => (/\b(error|fatal|panic|exception|failed)\b/i.test(line) ? ' err' : /\bwarn(ing)?\b/i.test(line) ? ' warn' : '')
-const stamp = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+/** Errors: what went to stderr, or says it failed. */
+function severity(l) {
+  if (l.stream === 'stderr' || /\b(error|fatal|panic|exception|failed)\b/i.test(l.text)) return 'err'
+  if (/\bwarn(ing)?\b/i.test(l.text)) return 'warn'
+  return ''
+}
+
+const stamp = (ms) => {
+  const d = new Date(ms)
+  const pad = (n, w = 2) => String(n).padStart(w, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+/** Sixty bars over the range, errors stacked on top in red. */
+function Histogram({ lines, from, to }) {
+  const n = 60
+  const width = (to - from) / n
+  const all = new Array(n).fill(0)
+  const bad = new Array(n).fill(0)
+  for (const l of lines) {
+    const i = Math.min(n - 1, Math.max(0, Math.floor((l.t - from) / width)))
+    all[i]++
+    if (severity(l) === 'err') bad[i]++
+  }
+  const top = Math.max(1, ...all)
+  return (
+    <div class="histogram" aria-hidden="true">
+      <div class="bars">
+        {all.map((c, i) => (
+          <span key={i} class="bar" style={`height:${(c / top) * 100}%`} title={`${c} lines`}>
+            {bad[i] > 0 && <span class="bad" style={`height:${(bad[i] / c) * 100}%`} />}
+          </span>
+        ))}
+      </div>
+      <div class="ends">
+        <span>{clock(from)}</span>
+        <span>{clock(to)}</span>
+      </div>
+    </div>
+  )
+}
+
+function download(lines) {
+  const text = lines.map((l) => `${new Date(l.t).toISOString()} ${l.service} ${l.stream} ${l.text}`).join('\n')
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([text + '\n'], { type: 'text/plain' }))
+  a.download = `${page.peek().project}-${page.peek().env}-logs.txt`
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+}
+
+function chooseService(e, names) {
+  openMenu(e.currentTarget, [
+    ['All services', null, () => (only.value = '')],
+    null,
+    ...names.map((n) => [n, null, () => (only.value = n)]),
+  ])
+}
 
 export function ProjectLogs() {
   const d = data.value
   const ready = d.key === key.value && d.lines
   const names = (services.value || []).filter((s) => s.container || s.deployment > 0).map((s) => s.name)
   const q = asked.value
+  const to = Date.now()
+  const from = to - range.value * 1000
+  const lines = ready ? d.lines.filter((l) => l.t >= from) : []
+  const cut = ready && d.lines.length > lines.length
   return (
     <div class="stage-page logs-page">
-      <header class="logs-head">
-        <div class="search" style="flex:1;max-width:520px">
+      <header class="logs-toolbar">
+        <div class="search filter">
           <Search />
-          <input class="input" placeholder="Search the logs of every service..." value={query.value} onInput={onInput} aria-label="Search logs" />
+          <input class="input" id="logs-search" placeholder="Filter and search logs" value={query.value} onInput={onInput} aria-label="Search logs" />
+          <kbd class="kbd">/</kbd>
         </div>
-        <select class="select" style="width:auto;height:32px" value={only.value} onChange={(e) => (only.value = e.currentTarget.value)} aria-label="Service">
-          <option value="">All services</option>
-          {names.map((n) => (
-            <option key={n} value={n}>
-              {n}
-            </option>
-          ))}
-        </select>
-        <span class="spacer" />
-        <button class={`btn sm${live.value ? ' active' : ''}`} aria-pressed={live.value} onClick={() => (live.value = !live.value)}>
-          {live.value ? <Pause /> : <Play />}
-          {live.value ? 'Live' : 'Paused'}
+        <button class="btn sm" onClick={(e) => chooseService(e, names)}>
+          {only.value || 'All services'}
+        </button>
+        <button class="btn icon sm" aria-label="Download these logs" title="Download" onClick={() => download(lines)} disabled={!lines.length}>
+          <Download />
+        </button>
+        <RangePicker value={range.value} onChange={(v) => (range.value = v)} />
+        <button class={`btn icon sm live${live.value ? ' on' : ''}`} aria-pressed={live.value} aria-label={live.value ? 'Live: on' : 'Live: paused'} title={live.value ? 'Live' : 'Paused'} onClick={() => (live.value = !live.value)}>
+          <Radio />
         </button>
       </header>
       {!ready ? (
@@ -113,19 +184,28 @@ export function ProjectLogs() {
         </div>
       ) : (
         <>
+          <Histogram lines={lines} from={from} to={to} />
+          <div class="log-columns">
+            <span />
+            <span>Time</span>
+            <span>Service</span>
+            <span>Data</span>
+          </div>
           <div
-            class="logs"
+            class="logs log-table"
             ref={(e) => (el = e)}
             onScroll={(e) => {
               const t = e.currentTarget
               stick = t.scrollTop + t.clientHeight >= t.scrollHeight - 40
             }}
           >
-            {d.lines.length === 0 && <span class="muted">{q ? 'No line matches.' : 'Nothing logged yet.'}</span>}
-            {d.lines.map((l, i) => (
-              <div key={i} class={`line env-line${level(l.text)}`}>
-                <span class="muted">{stamp(l.t)}</span>
-                <button class="svc-tag" onClick={() => openService(l.service, { tab: undefined })} title={`Open ${l.service}`}>
+            {cut && <div class="range-start">You reached the start of the range · {stamp(from)}</div>}
+            {lines.length === 0 && <div class="empty small">{q ? `No line matches “${q}” in this range.` : 'Nothing logged in this range.'}</div>}
+            {lines.map((l, i) => (
+              <div key={i} class={`log-line ${severity(l)}`}>
+                <span class="sev" />
+                <span class="time">{stamp(l.t)}</span>
+                <button class="svc-name" onClick={() => openService(l.service, { tab: undefined })} title={`Open ${l.service}`}>
                   {l.service}
                 </button>
                 <span class="text">
@@ -134,9 +214,15 @@ export function ProjectLogs() {
               </div>
             ))}
           </div>
-          <footer class="logs-foot">
-            {d.error ? <span class="status red">{d.error}</span> : `${d.lines.length} lines${q ? ` matching “${q}”` : ''}${d.lines.length >= 2000 ? ' (the latest 2,000)' : ''}`}
-          </footer>
+          <div class="scroll-buttons">
+            <button class="btn icon sm" aria-label="To the oldest line" onClick={() => el && (el.scrollTop = 0)}>
+              <ArrowUp />
+            </button>
+            <button class="btn icon sm" aria-label="To the newest line" onClick={() => el && ((el.scrollTop = el.scrollHeight), (stick = true))}>
+              <ArrowDown />
+            </button>
+          </div>
+          {d.error && <footer class="logs-foot"><span class="status red">{d.error}</span></footer>}
         </>
       )}
     </div>

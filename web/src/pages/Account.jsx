@@ -1,12 +1,13 @@
 // The signed-in user: password, two-factor authentication and API tokens.
 
 import { effect, signal, untracked } from '@preact/signals'
-import { Copy, KeyRound, Plus, Shield, Trash } from 'lucide-preact'
+import { Copy, KeyRound, Plus, Shield, Trash, User } from 'lucide-preact'
 import qrcode from 'qrcode-generator'
 import { del, get, post } from '../api.js'
 import { me, toast } from '../state.js'
-import { route } from '../router.js'
+import { navigate, route, withQuery } from '../router.js'
 import { attempt, confirm, copy, openForm, timeAgo } from '../ui.jsx'
+import { SettingsLayout } from './SettingsLayout.jsx'
 
 const tokens = signal(null)
 /** The token just created: shown once. */
@@ -175,16 +176,20 @@ function TwoFactor({ user }) {
   )
 }
 
+const sections = [
+  ['profile', 'Profile', User],
+  ['security', 'Security', Shield],
+  ['tokens', 'API Tokens', KeyRound],
+]
+
 export function Account() {
   const user = me.value
   const list = tokens.value
   const made = fresh.value
+  const tab = sections.some(([id]) => id === route.value.query.tab) ? route.value.query.tab : 'profile'
   return (
-    <div class="page" style="max-width:860px">
-      <div class="page-head">
-        <h1>Account</h1>
-      </div>
-
+    <SettingsLayout title="Account" items={sections} current={tab} onSelect={(id) => navigate(withQuery('/account', { tab: id === 'profile' ? undefined : id }), true)}>
+      {tab === 'profile' && (
       <section class="card card-pad set-card">
         <h3>Profile</h3>
         <div class="row">
@@ -193,19 +198,30 @@ export function Account() {
             <b>{user.email}</b>
             {user.created_at > 0 && <div class="muted small">Member since {new Date(user.created_at * 1000).toLocaleDateString()}</div>}
           </div>
-          <button class="btn sm" onClick={changePassword}>
-            <KeyRound /> Change password
-          </button>
+          <span class={`badge${user.totp_enabled ? ' green' : ''}`}>{user.totp_enabled ? '2FA on' : '2FA off'}</span>
         </div>
       </section>
-
+      )}
+      {tab === 'security' && (
+        <>
+          <section class="card card-pad set-card">
+            <h3>Password</h3>
+            <div class="row">
+              <span class="muted small" style="flex:1">Changing it signs out your other sessions.</span>
+              <button class="btn sm" onClick={changePassword}>
+                <KeyRound /> Change password
+              </button>
+            </div>
+          </section>
       <section class="card card-pad set-card">
         <h3 class="row">
           <Shield width={16} height={16} /> Two-factor authentication
         </h3>
         <TwoFactor user={user} />
       </section>
-
+        </>
+      )}
+      {tab === 'tokens' && (
       <section class="card card-pad set-card">
         <div class="row" style="margin-bottom:12px">
           <h3 style="margin:0">API Tokens</h3>
@@ -256,6 +272,7 @@ export function Account() {
           </table>
         )}
       </section>
-    </div>
+      )}
+    </SettingsLayout>
   )
 }
