@@ -288,7 +288,11 @@ install_binary() {
 # Running it -----------------------------------------------------------------
 
 PH() {
-    PHARBOR_ROOT=$DATA PDOCK_BIN="$INSTALL_DIR/pdock" "$INSTALL_DIR/pharbor" "$@"
+    if [ -n "$ENGINE_ROOT" ]; then
+        POCKETDOCK_ROOT=$ENGINE_ROOT PHARBOR_ROOT=$DATA PDOCK_BIN="$INSTALL_DIR/pdock" "$INSTALL_DIR/pharbor" "$@"
+    else
+        PHARBOR_ROOT=$DATA PDOCK_BIN="$INSTALL_DIR/pdock" "$INSTALL_DIR/pharbor" "$@"
+    fi
 }
 
 proxy_pid() {
@@ -342,6 +346,10 @@ remember() {
     if [ "$DATA" != "$HOME/.pocketharbor" ]; then
         lines="$lines${lines:+
 }export PHARBOR_ROOT=\"$DATA\""
+    fi
+    if [ -n "$ENGINE_ROOT" ]; then
+        lines="$lines${lines:+
+}export POCKETDOCK_ROOT=\"$ENGINE_ROOT\""
     fi
     [ -n "$lines" ] || return 0
     case "$PLATFORM" in
@@ -399,6 +407,11 @@ main() {
     ABI=$(detect_abi)
     [ -n "$INSTALL_DIR" ] || INSTALL_DIR=$(default_install_dir)
     [ -n "$DATA" ] || DATA=$(default_data_dir)
+    # An adb shell has HOME=/, where pdock cannot keep its images.
+    ENGINE_ROOT=${POCKETDOCK_ROOT:-}
+    case "$PLATFORM" in
+        adb | android) [ -n "$ENGINE_ROOT" ] || ENGINE_ROOT=/data/local/tmp/pocketharbor/engine ;;
+    esac
     [ -n "$PORT" ] || PORT=8080
     [ -n "$BIND" ] || BIND=0.0.0.0
     if [ -z "$FROM" ] && ! have_fetcher; then
