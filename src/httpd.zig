@@ -218,7 +218,11 @@ fn serveOne(job: Job) void {
 }
 
 pub fn serve(addr: net.Addr, handler: Handler, ctx: *anyopaque) !void {
-    const listener = try net.listenTcp(addr);
+    return serveOn(try net.listenTcp(addr), handler, ctx);
+}
+
+/// Serves on a socket that is already listening.
+pub fn serveOn(listener: i32, handler: Handler, ctx: *anyopaque) !void {
     // Blocking accepts suit a thread per connection.
     _ = linux.fcntl(listener, linux.F.SETFL, 0);
     while (true) {

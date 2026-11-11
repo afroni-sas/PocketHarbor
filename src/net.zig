@@ -30,6 +30,14 @@ pub fn listenTcp(addr: Addr) sys.Err!i32 {
     return fd;
 }
 
+/// The port a socket is bound to, such as the one the kernel picked for 0.
+pub fn localPort(fd: i32) !u16 {
+    var sa: linux.sockaddr.in = undefined;
+    var len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    _ = try sys.ck(linux.getsockname(fd, @ptrCast(&sa), &len));
+    return std.mem.bigToNative(u16, sa.port);
+}
+
 pub fn loopback(port: u16) linux.sockaddr.in {
     return .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
 }
