@@ -449,6 +449,9 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
         const copied = try deploy.duplicateEnvironment(c.store, c.vars, name, body.from, body.name);
         return c.res.json(201, .{ .name = body.name, .copied = copied });
     }
+    if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "activity") and method(c, "GET")) {
+        return environmentActivity(c, name, seg[2]);
+    }
     if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "logs") and method(c, "GET")) {
         return environmentLogs(c, name, seg[2]);
     }
@@ -790,6 +793,44 @@ fn openTerminal(c: *Ctx, svc: Service) !void {
     const fd = c.res.hijack();
     ws.handshake(fd, key) catch return;
     terminal.session(c.a, fd, c.panel.pdock, c.panel.envp, svc.container);
+}
+
+const Event = struct {
+    service: []const u8,
+    number: u32,
+    status: []const u8,
+    trigger: []const u8,
+    image: []const u8,
+    message: []const u8,
+    reason: []const u8,
+    created_at: i64,
+    finished_at: i64,
+};
+
+/// The latest deployments of every service of an environment, newest
+/// first: the activity feed of the project page.
+fn environmentActivity(c: *Ctx, project: []const u8, env: []const u8) !void {
+    var out: std.ArrayList(Event) = .empty;
+    for (try c.store.listIn(project, env)) |svc| {
+        const list = c.store.listDeployments(c.store.idOf(svc)) catch continue;
+        for (list[0..@min(list.len, 20)]) |d| try out.append(c.a, .{
+            .service = svc.name,
+            .number = d.number,
+            .status = d.status,
+            .trigger = d.trigger,
+            .image = d.image,
+            .message = d.message,
+            .reason = d.reason,
+            .created_at = d.created_at,
+            .finished_at = d.finished_at,
+        });
+    }
+    std.mem.sort(Event, out.items, {}, struct {
+        fn newer(_: void, x: Event, y: Event) bool {
+            return x.created_at > y.created_at;
+        }
+    }.newer);
+    c.res.json(200, out.items[0..@min(out.items.len, 50)]);
 }
 
 const LogLine = struct { t: i64, service: []const u8, stream: []const u8, text: []const u8 };
