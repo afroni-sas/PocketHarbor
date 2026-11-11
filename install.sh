@@ -323,9 +323,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Environment=PHARBOR_ROOT=$DATA
-Environment=PDOCK_BIN=$INSTALL_DIR/pdock
-ExecStart=$INSTALL_DIR/pharbor serve --listen $BIND:$PORT
+Environment="PHARBOR_ROOT=$DATA"
+Environment="PDOCK_BIN=$INSTALL_DIR/pdock"
+ExecStart="$INSTALL_DIR/pharbor" serve --listen $BIND:$PORT
 Restart=on-failure
 RestartSec=5
 
