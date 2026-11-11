@@ -20,6 +20,7 @@ const github = @import("github.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
+const web_assets = @import("web_assets.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
@@ -340,6 +341,7 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
         .key = try crypto.loadKey(c.store.root),
         .pdock = c.eng.bin,
         .envp = c.envp,
+        .assets = &web_assets.files,
     };
     const thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, scheduler.run, .{ c.store.root, c.envp });
     thread.detach();
