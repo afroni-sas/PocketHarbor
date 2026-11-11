@@ -7,6 +7,7 @@ import { del, get, patch, post, put } from '../api.js'
 import { me, toast } from '../state.js'
 import { navigate, route, withQuery } from '../router.js'
 import { attempt, confirm, copy, openForm, Spinner, timeAgo } from '../ui.jsx'
+import { Alerts } from './Alerts.jsx'
 
 const data = signal({ settings: null, github: null, tunnel: null, registries: null, users: null, services: null })
 const showSecret = signal(false)
@@ -21,6 +22,8 @@ const loaders = {
   github: async () => ({ github: await get('/github') }),
   registries: async () => ({ registries: await get('/registries') }),
   members: async () => ({ users: await get('/users') }),
+  // Alerts.jsx loads its own data.
+  alerts: async () => ({}),
 }
 
 async function load(tab) {
@@ -37,6 +40,7 @@ const tabs = [
   ['networking', 'Public access'],
   ['github', 'GitHub'],
   ['registries', 'Registries'],
+  ['alerts', 'Alerts'],
   ['members', 'Members'],
 ]
 
@@ -460,7 +464,7 @@ function Members() {
   )
 }
 
-const views = { general: General, networking: Networking, github: Github, registries: Registries, members: Members }
+const views = { general: General, networking: Networking, github: Github, registries: Registries, alerts: Alerts, members: Members }
 
 export function Workspace() {
   const tab = currentTab()
