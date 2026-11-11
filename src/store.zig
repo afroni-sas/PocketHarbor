@@ -54,6 +54,9 @@ pub const Service = struct {
     volumes: []const Volume = &.{},
     /// "daily", "weekly" or empty: when its volumes are backed up.
     backup_schedule: []const u8 = "",
+    /// A cron schedule, in UTC. Such a service has no long-running container:
+    /// each run starts the active deployment's image and waits for it to end.
+    cron: []const u8 = "",
     /// Where its card sits on the canvas.
     x: i32 = 0,
     y: i32 = 0,

@@ -12,6 +12,8 @@ const store_mod = @import("store.zig");
 const vars_mod = @import("vars.zig");
 const github = @import("github.zig");
 const backup = @import("backup.zig");
+const cron = @import("cron.zig");
+const scheduler = @import("scheduler.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -310,6 +312,8 @@ const ServiceView = struct {
     pre_deploy: []const u8,
     volumes: []const store_mod.Volume,
     backup_schedule: []const u8,
+    cron: []const u8,
+    last_run: ?scheduler.LastRun,
     port: u16,
     domains: []const []const u8,
     hostnames: []const []const u8,
@@ -324,7 +328,16 @@ const ServiceView = struct {
 
 fn serviceView(c: *Ctx, svc: Service) !ServiceView {
     const info = if (svc.container.len > 0) c.eng.inspect(svc.container) else null;
-    const status: []const u8 = if (svc.asleep) "asleep" else if (info) |i| i.status else if (svc.deployment > 0) "failed" else "new";
+    const status: []const u8 = if (svc.cron.len > 0 and svc.deployment > 0)
+        "scheduled"
+    else if (svc.asleep)
+        "asleep"
+    else if (info) |i|
+        i.status
+    else if (svc.deployment > 0)
+        "failed"
+    else
+        "new";
     return .{
         .id = c.store.idOf(svc),
         .project = svc.project,
@@ -340,6 +353,8 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .pre_deploy = svc.pre_deploy,
         .volumes = svc.volumes,
         .backup_schedule = svc.backup_schedule,
+        .cron = svc.cron,
+        .last_run = if (svc.cron.len > 0) scheduler.lastRun(c.store, c.store.idOf(svc)) else null,
         .port = svc.port,
         .domains = svc.domains,
         .hostnames = try c.store.hostnames(svc, c.store.settings()),
@@ -452,6 +467,7 @@ const ServiceInput = struct {
     pre_deploy: ?[]const u8 = null,
     volumes: ?[]const store_mod.Volume = null,
     backup_schedule: ?[]const u8 = null,
+    cron: ?[]const u8 = null,
     port: ?u16 = null,
     domains: ?[]const []const u8 = null,
     env: ?[]const []const u8 = null,
@@ -485,6 +501,10 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
             if (!backup.validMount(v.mount) or !store_mod.validName(v.name)) return error.BadVolume;
         }
         svc.volumes = list;
+    }
+    if (in.cron) |v| {
+        if (v.len > 0 and !cron.valid(v)) return error.BadCron;
+        svc.cron = v;
     }
     if (in.backup_schedule) |v| {
         if (v.len > 0 and !std.mem.eql(u8, v, "daily") and !std.mem.eql(u8, v, "weekly")) return error.BadSchedule;
@@ -600,6 +620,15 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");
         startDeploy(c, id, "api");
         return c.res.json(202, .{ .ok = true });
+    }
+    if (eql(what, "run") and method(c, "POST")) {
+        if (svc.cron.len == 0) return c.res.fail(409, "not a cron service");
+        scheduler.spawn(c.panel.envp, "_cronrun", id);
+        return c.res.json(202, .{ .ok = true });
+    }
+    if (eql(what, "cron-log") and method(c, "GET")) {
+        const data = sys.readFileAlloc(c.a, scheduler.logPath(c.store, id), 1 << 26) catch "";
+        return c.res.send(200, "text/plain; charset=utf-8", lastLines(data, 500));
     }
     if (eql(what, "volumes") and method(c, "GET")) {
         const View = struct { name: []const u8, mount: []const u8, size: u64 };
