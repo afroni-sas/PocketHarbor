@@ -171,6 +171,7 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "settings")) return settings(c);
     if (eql(seg[0], "github")) return githubSettings(c, seg[1..]);
     if (eql(seg[0], "registries")) return registries(c, seg[1..]);
+    if (eql(seg[0], "tunnel")) return tunnelApi(c, seg[1..]);
     c.res.fail(404, "not found");
 }
 
@@ -297,7 +298,10 @@ fn tokens(c: *Ctx, seg: []const []const u8) !void {
     c.res.fail(404, "not found");
 }
 
+const DeploymentSummary = struct { number: u32, status: []const u8, trigger: []const u8, commit: []const u8, message: []const u8, image: []const u8, created_at: i64 };
+
 const ServiceView = struct {
+    latest: ?DeploymentSummary,
     id: []const u8,
     project: []const u8,
     environment: []const u8,
@@ -338,7 +342,17 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         "failed"
     else
         "new";
+    var latest: ?DeploymentSummary = null;
+    if (svc.deployment > 0) {
+        if (c.store.listDeployments(c.store.idOf(svc))) |all| {
+            if (all.len > 0) {
+                const d = all[0];
+                latest = .{ .number = d.number, .status = d.status, .trigger = d.trigger, .commit = d.commit, .message = d.message, .image = d.image, .created_at = d.created_at };
+            }
+        } else |_| {}
+    }
     return .{
+        .latest = latest,
         .id = c.store.idOf(svc),
         .project = svc.project,
         .environment = svc.environment,
@@ -383,7 +397,8 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
             for (all) |svc| {
                 if (!eql(svc.project, p.name) or !eql(svc.environment, store_mod.default_environment)) continue;
                 count += 1;
-                if (svc.asleep) {
+                // A cron service between runs is as healthy as it gets.
+                if (svc.asleep or (svc.cron.len > 0 and svc.deployment > 0)) {
                     online += 1;
                 } else if (svc.container.len > 0) {
                     if (c.eng.inspect(svc.container)) |i| {
@@ -425,6 +440,9 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
         if (!validName(body.name)) return c.res.fail(400, "use a-z, 0-9 and -");
         const copied = try deploy.duplicateEnvironment(c.store, c.vars, name, body.from, body.name);
         return c.res.json(201, .{ .name = body.name, .copied = copied });
+    }
+    if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "edges") and method(c, "GET")) {
+        return c.res.json(200, try edges(c, name, seg[2]));
     }
     if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "variables")) {
         if (!(try c.store.loadProject(name)).hasEnvironment(seg[2])) return c.res.fail(404, "no such environment");
@@ -706,6 +724,35 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
     c.res.fail(404, "not found");
 }
 
+const Edge = struct { from: []const u8, to: []const u8 };
+
+/// Which service refers to which, from ${{ name.KEY }} in their variables:
+/// the dashed arrows of the canvas.
+fn edges(c: *Ctx, project: []const u8, env: []const u8) ![]Edge {
+    var out: std.ArrayList(Edge) = .empty;
+    const list = try c.store.listIn(project, env);
+    for (list) |svc| {
+        for (try c.vars.get(project, env, svc.name)) |v| {
+            var rest = v.value;
+            while (std.mem.indexOf(u8, rest, "${{")) |start| {
+                const end = std.mem.indexOfPos(u8, rest, start, "}}") orelse break;
+                const ref = std.mem.trim(u8, rest[start + 3 .. end], " ");
+                rest = rest[end + 2 ..];
+                const dot = std.mem.indexOfScalar(u8, ref, '.') orelse continue;
+                const target = ref[0..dot];
+                if (eql(target, "shared") or eql(target, svc.name)) continue;
+                var exists = false;
+                for (list) |other| exists = exists or eql(other.name, target);
+                if (!exists) continue;
+                var dup = false;
+                for (out.items) |e| dup = dup or (eql(e.from, svc.name) and eql(e.to, target));
+                if (!dup) try out.append(c.a, .{ .from = svc.name, .to = target });
+            }
+        }
+    }
+    return out.items;
+}
+
 fn parseEntries(a: Allocator, list: []const []const u8) ![]vars_mod.Var {
     const out = try a.alloc(vars_mod.Var, list.len);
     for (list, 0..) |e, i| {
@@ -772,6 +819,75 @@ fn webhookSecret(c: *Ctx) ![]const u8 {
         try c.store.saveSettings(s);
     }
     return crypto.open(c.a, c.panel.key, s.webhook_secret);
+}
+
+/// Runs `pharbor ARGS...` and returns what it printed; the tunnel commands
+/// already know how to wait for cloudflared.
+fn runSelf(c: *Ctx, args: []const []const u8) !struct { code: u8, text: []const u8 } {
+    const argv = try c.a.allocSentinel(?[*:0]const u8, args.len + 1, null);
+    argv[0] = "pharbor";
+    for (args, 0..) |s, i| argv[i + 1] = (try c.a.dupeSentinel(u8, s, 0)).ptr;
+    var pipe: [2]i32 = undefined;
+    _ = try sys.ck(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+    const pid = try sys.fork();
+    if (pid == 0) {
+        _ = linux.dup2(pipe[1], 1);
+        _ = linux.dup2(pipe[1], 2);
+        _ = linux.execve("/proc/self/exe", argv.ptr, c.panel.envp);
+        linux.exit_group(127);
+    }
+    sys.close(pipe[1]);
+    defer sys.close(pipe[0]);
+    var text: std.ArrayList(u8) = .empty;
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = sys.read(pipe[0], &buf) catch break;
+        if (n == 0) break;
+        try text.appendSlice(c.a, buf[0..n]);
+    }
+    var status: i32 = 0;
+    _ = linux.waitpid(pid, &status, 0);
+    const st: u32 = @bitCast(status);
+    return .{ .code = if (linux.W.IFEXITED(st)) linux.W.EXITSTATUS(st) else 1, .text = text.items };
+}
+
+fn tunnelApi(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 0 and method(c, "GET")) {
+        const out = try runSelf(c, &.{ "tunnel", "status" });
+        var lines = std.mem.tokenizeScalar(u8, out.text, '\n');
+        const status = lines.next() orelse "";
+        var url: []const u8 = "";
+        while (lines.next()) |l| {
+            if (std.mem.startsWith(u8, l, "https://")) url = l;
+        }
+        return c.res.json(200, .{
+            .running = eql(status, "running"),
+            .status = if (eql(status, "No tunnel")) "" else status,
+            .url = url,
+            .default_service = c.store.settings().default_service,
+        });
+    }
+    if (seg.len == 1 and eql(seg[0], "quick") and method(c, "POST")) {
+        const body = c.req.json(struct { service: []const u8 }) catch return c.res.fail(400, "send service");
+        if (!c.store.exists(body.service)) return c.res.fail(404, "no such service");
+        const svc = try c.store.load(body.service);
+        const out = try runSelf(c, &.{ "tunnel", "quick", svc.name, "--project", svc.project, "--env", svc.environment });
+        if (out.code != 0) return c.res.fail(502, out.text);
+        const i = std.mem.indexOf(u8, out.text, "https://") orelse return c.res.fail(502, out.text);
+        const end = std.mem.indexOfScalarPos(u8, out.text, i, ' ') orelse out.text.len;
+        return c.res.json(201, .{ .url = out.text[i..end] });
+    }
+    if (seg.len == 1 and eql(seg[0], "named") and method(c, "POST")) {
+        const body = c.req.json(struct { token: []const u8 }) catch return c.res.fail(400, "send token");
+        const out = try runSelf(c, &.{ "tunnel", "start", body.token });
+        if (out.code != 0) return c.res.fail(502, out.text);
+        return c.res.json(201, .{ .output = out.text });
+    }
+    if (seg.len == 0 and method(c, "DELETE")) {
+        _ = try runSelf(c, &.{ "tunnel", "stop" });
+        return c.res.json(200, .{ .ok = true });
+    }
+    c.res.fail(404, "not found");
 }
 
 /// Credentials for private image registries, kept by the engine.
