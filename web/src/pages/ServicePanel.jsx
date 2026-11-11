@@ -38,6 +38,7 @@ import { loadVars, VariablesEditor } from './Variables.jsx'
 import { LogsView } from './Logs.jsx'
 import { MetricsTab } from './Metrics.jsx'
 import { ConsoleTab } from './Console.jsx'
+import { DataTab, dbKind } from './Data.jsx'
 
 const deployments = signal({ id: '', list: null })
 const backups = signal({ id: '', volumes: null, list: null })
@@ -50,7 +51,8 @@ const backingUp = signal('')
 const current = computed(() => {
   const p = page.value
   if (!me.value || !p || !p.service) return ''
-  return `${serviceId(p, p.service)}\n${p.tab || 'deployments'}`
+  const svc = (services.value || []).find((s) => s.name === p.service)
+  return `${serviceId(p, p.service)}\n${p.tab || (svc && dbKind(svc) ? 'data' : 'deployments')}`
 })
 
 async function loadDeployments(id) {
@@ -915,6 +917,7 @@ export function ServicePanel() {
     )
   }
   const tabs = [
+    dbKind(svc) && ['data', 'Data'],
     ['deployments', 'Deployments'],
     ['variables', 'Variables'],
     ['metrics', 'Metrics'],
@@ -923,7 +926,8 @@ export function ServicePanel() {
     svc.cron && ['runs', 'Cron Runs'],
     ['settings', 'Settings'],
   ].filter(Boolean)
-  const tab = tabs.some(([id]) => id === p.tab) ? p.tab : 'deployments'
+  // The first tab is the default one, and has no ?tab= in the URL.
+  const tab = tabs.some(([id]) => id === p.tab) ? p.tab : tabs[0][0]
   return (
     <>
       <aside class="panel" aria-label={svc.name}>
@@ -938,13 +942,14 @@ export function ServicePanel() {
           </div>
           <nav class="tabs">
             {tabs.map(([id, label]) => (
-              <button key={id} class={`tab${tab === id ? ' active' : ''}`} onClick={() => setQuery({ tab: id === 'deployments' ? undefined : id }, true)}>
+              <button key={id} class={`tab${tab === id ? ' active' : ''}`} onClick={() => setQuery({ tab: id === tabs[0][0] ? undefined : id }, true)}>
                 {label}
               </button>
             ))}
           </nav>
         </div>
         <div class="panel-body">
+          {tab === 'data' && <DataTab svc={svc} />}
           {tab === 'deployments' && <Deployments svc={svc} />}
           {tab === 'variables' && (
             <VariablesEditor
