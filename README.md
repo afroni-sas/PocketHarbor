@@ -1,8 +1,32 @@
 # PocketHarbor
 
 Deploy and serve applications from an Android phone, without root. PocketHarbor
-runs on top of the [PocketDock](https://github.com/afroni-sas/PocketDock) engine
-and needs `pdock` installed.
+runs on top of the [PocketDock](https://github.com/afroni-sas/PocketDock) engine,
+which the installer installs with it.
+
+## Install
+
+In Termux, or on Linux:
+
+```sh
+gh release download -R afroni-sas/PocketHarbor -p install.sh && sh install.sh
+```
+
+It asks where to keep the data, the port, the owner account, the domains, a
+Cloudflare tunnel token and whether to start at boot (Termux:Boot or systemd),
+then installs `pharbor` and `pdock`, checks their SHA-256 sums and starts
+everything. With `--yes` it asks nothing: the defaults, the options and the
+`PHARBOR_*` variables decide, for instance
+`sh install.sh --yes --email you@example.com --domain apps.example.com`.
+`sh install.sh --help` lists them all. Run it again to update; the data stays.
+
+While this repository is private, the installer needs a token that can read
+it: the one of `gh` when you are signed in, or `GITHUB_TOKEN`. From a computer
+with adb, push the release files and run it with `--from`; the release notes
+show how.
+
+Releases are built by `.github/workflows/release.yml` when a `vX.Y.Z` tag
+matching `src/version.zig` and `build.zig.zon` is pushed.
 
 ## Quick start
 
