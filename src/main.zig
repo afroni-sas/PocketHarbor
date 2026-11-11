@@ -58,6 +58,7 @@ const usage =
     \\      --health PATH                  HTTP path that must answer 2xx or 3xx
     \\      --sleep-after TIME             Stop after this long idle, e.g. 10m; 0 is never
     \\      --timeout SEC                  Time allowed to become healthy (default 180)
+    \\      --restart POLICY               on-failure[:N] (default, 10 tries), always or never
     \\  ls [--project P] [--env E]         List services
     \\  rm NAME                            Remove a service
     \\  logs NAME [-f] [--tail N]          Application output
@@ -837,7 +838,7 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
 
 fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
     var opts: deploy.Options = .{};
-    var run_opts = runOptions(c, "cli");
+    const run_opts = runOptions(c, "cli");
     var scope: Scope = .{};
     var name: ?[]const u8 = null;
     var domains: std.ArrayList([]const u8) = .empty;
@@ -889,7 +890,11 @@ fn cmdDeploy(c: *Ctx, args: []const [:0]const u8) !void {
         } else if (eql(o, "--sleep-after")) {
             opts.sleep_after_s = parseDuration(value(args, &i)) catch die("invalid duration", .{});
         } else if (eql(o, "--timeout")) {
-            run_opts.timeout_s = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid timeout", .{});
+            opts.health_timeout_s = std.fmt.parseInt(u32, value(args, &i), 10) catch die("invalid timeout", .{});
+        } else if (eql(o, "--restart")) {
+            const v = value(args, &i);
+            if (deploy.parseRestart(v) == null) die("--restart takes on-failure[:N], always or never", .{});
+            opts.restart_policy = v;
         } else if (o.len > 0 and o[0] == '-') {
             die("unknown option \"{s}\" for deploy", .{o});
         } else if (name == null) {

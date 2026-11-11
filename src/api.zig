@@ -330,6 +330,9 @@ const ServiceView = struct {
     domains: []const []const u8,
     hostnames: []const []const u8,
     health_path: []const u8,
+    health_timeout_s: u32,
+    restart_policy: []const u8,
+    restart_retries: u32,
     sleep_after_s: u32,
     status: []const u8,
     deployment: u32,
@@ -381,6 +384,9 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .domains = svc.domains,
         .hostnames = try c.store.hostnames(svc, c.store.settings()),
         .health_path = svc.health_path,
+        .health_timeout_s = svc.health_timeout_s,
+        .restart_policy = svc.restart_policy,
+        .restart_retries = svc.restart_retries,
         .sleep_after_s = svc.sleep_after_s,
         .status = status,
         .deployment = svc.deployment,
@@ -504,6 +510,9 @@ const ServiceInput = struct {
     domains: ?[]const []const u8 = null,
     env: ?[]const []const u8 = null,
     health_path: ?[]const u8 = null,
+    health_timeout_s: ?u32 = null,
+    restart_policy: ?[]const u8 = null,
+    restart_retries: ?u32 = null,
     sleep_after_s: ?u32 = null,
     x: ?i32 = null,
     y: ?i32 = null,
@@ -551,6 +560,19 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
     if (in.health_path) |v| {
         if (v.len > 0 and v[0] != '/') return error.BadHealthPath;
         svc.health_path = v;
+    }
+    if (in.health_timeout_s) |v| {
+        if (v > 3600) return error.BadHealthTimeout;
+        svc.health_timeout_s = v;
+    }
+    if (in.restart_policy) |v| {
+        const policy = deploy.parseRestart(v) orelse return error.BadRestartPolicy;
+        if (policy.retries != null) return error.BadRestartPolicy;
+        svc.restart_policy = policy.name;
+    }
+    if (in.restart_retries) |v| {
+        if (v == 0 or v > 1000) return error.BadRestartRetries;
+        svc.restart_retries = v;
     }
     if (in.sleep_after_s) |v| svc.sleep_after_s = v;
     if (in.x) |v| svc.x = v;
