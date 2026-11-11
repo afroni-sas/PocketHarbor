@@ -619,6 +619,25 @@ pre.card { padding: 14px; }
 .palette-item .hint { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
 .palette-item .enter { color: var(--muted); }
 
+/* The Add dialog: the palette's look, with a label above it in a sub-list */
+.add-dialog-wrap { width: min(560px, 100%); display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.add-dialog { width: 100%; max-height: 60vh; }
+.add-dialog .palette-input { padding-left: 10px; }
+.add-dialog .palette-input .btn.icon { width: 28px; height: 28px; }
+.add-dialog .palette-item { height: 40px; }
+.add-crumb { padding: 3px 10px; border-radius: 6px; background: var(--gray-100); border: 1px solid var(--border); font-size: 12.5px; font-weight: 500; color: var(--gray-700); }
+.add-note { display: flex; align-items: flex-start; gap: 8px; margin: 4px 4px 8px; padding: 10px 12px; border-radius: 8px; background: var(--blue-bg); color: var(--blue); font-size: 13px; line-height: 1.45; text-align: left; border: 0; width: calc(100% - 8px); }
+.add-note > svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.add-note.link { cursor: pointer; }
+.add-note.link:hover { filter: brightness(1.15); }
+.add-note.red { background: var(--red-bg); color: var(--red); }
+.add-image { padding: 10px; }
+.add-image .add-note { margin: 0 0 10px; width: 100%; }
+.add-examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.add-examples b { width: 100%; font-size: 12px; font-weight: 500; color: var(--muted); margin-bottom: 2px; }
+.add-examples button { padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--gray-50); color: var(--gray-700); font-size: 12.5px; cursor: pointer; }
+.add-examples button:hover { background: var(--gray-100); color: var(--fg); }
+
 
 /* Settings pages: Railway's left menu */
 .settings-page { max-width: 1080px; margin: 0 auto; padding: 0 40px 48px; }
@@ -633,6 +652,44 @@ pre.card { padding: 14px; }
 .settings-nav button.on svg { color: var(--primary-fg); }
 .settings-content { min-width: 0; max-width: 720px; }
 
+
+/* A deployment: stacked over the service panel, as on Railway */
+.deploy-view {
+  position: absolute; top: 48px; right: 0; bottom: 0; width: min(880px, 64%); z-index: 15;
+  background: var(--bg); border: 1px solid var(--border); border-right: 0; border-bottom: 0; border-top-left-radius: 12px;
+  display: flex; flex-direction: column; box-shadow: 0 24px 64px rgba(0, 0, 0, .5); animation: slide .16s ease-out;
+}
+.deploy-view-head { padding: 28px 40px 0; }
+.deploy-view-head .panel-title { margin-bottom: 4px; gap: 12px; }
+.deploy-view-head .panel-title h2 { font-size: 20px; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.deploy-view-date { white-space: nowrap; }
+.deploy-view-host { margin: 0 0 16px 34px; }
+.deploy-view-tools { display: flex; align-items: center; gap: 8px; padding: 14px 40px 6px; }
+.deploy-view-tools .search { flex: 1; width: auto; }
+.deploy-view-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.deploy-view-body .logs { flex: 1; padding: 10px 40px; }
+.deploy-view-body .logs-foot { padding: 6px 40px; }
+.deploy .main.clickable { cursor: pointer; }
+.waiting { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 60px 20px; text-align: center; font-size: 14px; }
+.waiting > span { color: var(--muted); font-size: 13px; }
+.waiting .sketch { width: 110px; height: 72px; margin-bottom: 14px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); display: flex; flex-direction: column; gap: 6px; }
+.waiting .sketch span { height: 4px; border-radius: 2px; background: var(--gray-200); }
+.deploy-detail { padding: 20px 40px 40px; }
+.deploy-detail h4 { margin: 24px 0 10px; font-size: 14px; font-weight: 600; }
+.detail-state { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; border: 1px solid; font-size: 14px; }
+.detail-state svg { width: 16px; height: 16px; }
+.detail-state.green { color: var(--green); border-color: hsl(152, 32%, 16%); background: hsl(152, 28%, 9%); }
+.detail-state.red { color: var(--red); border-color: var(--red-border); background: var(--red-bg); }
+.detail-state.purple { color: var(--primary-fg); border-color: hsl(270, 45%, 28%); background: var(--primary-soft); }
+.detail-fold { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); color: var(--fg); font: inherit; font-size: 14px; cursor: pointer; text-align: left; }
+.detail-vars { padding: 8px 14px; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 8px 8px; margin-top: -1px; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.detail-card-title { display: block; margin-bottom: 10px; font-size: 14px; }
+.kv { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; font-size: 12.5px; color: var(--muted); }
+.kv b { font-weight: 500; font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-vars .kv { flex-direction: row; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border-soft); }
+.detail-vars .kv b { font-size: 12.5px; }
+
 /* Phones */
 @media (max-width: 760px) {
   .sidebar { display: none; }
@@ -643,6 +700,13 @@ pre.card { padding: 14px; }
   .rail { display: none; }
   .stage { margin: 0; border-radius: 0; border-left: 0; border-right: 0; }
   .panel { width: 100%; top: 0; border-radius: 0; border: 0; }
+  .deploy-view { width: 100%; top: 0; border-radius: 0; border: 0; }
+  .deploy-view-head, .deploy-detail { padding-left: 16px; padding-right: 16px; }
+  .deploy-view-head .panel-title { gap: 8px; }
+  .deploy-view-date { display: none; }
+  .deploy-view-tools .search { order: 0; width: auto; }
+  .deploy-view-tools, .deploy-view-body .logs, .deploy-view-body .logs-foot { padding-left: 12px; padding-right: 12px; }
+  .detail-grid { grid-template-columns: 1fr; }
   .panel-head { padding: 20px 16px 0; }
   .panel-close { top: 12px; right: 10px; }
   .panel-body { padding: 16px 16px 40px; }

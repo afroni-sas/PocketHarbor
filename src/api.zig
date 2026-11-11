@@ -716,6 +716,11 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         return c.res.json(200, .{ .ok = true });
     }
     if (eql(what, "deployments") and method(c, "GET")) {
+        if (seg.len == 4 and eql(seg[3], "variables")) {
+            const n = std.fmt.parseInt(u32, seg[2], 10) catch return c.res.fail(400, "bad number");
+            const list = deploy.loadSnapshot(c.store, c.vars, id, n) catch return c.res.json(200, &[_]vars_mod.Var{});
+            return c.res.json(200, list);
+        }
         if (seg.len == 4 and eql(seg[3], "log")) {
             const n = std.fmt.parseInt(u32, seg[2], 10) catch return c.res.fail(400, "bad number");
             const data = sys.readFileAlloc(c.a, c.store.deploymentLog(id, n), 1 << 24) catch "";
@@ -1325,6 +1330,21 @@ fn registries(c: *Ctx, seg: []const []const u8) !void {
 }
 
 fn githubSettings(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 1 and eql(seg[0], "repos") and method(c, "GET")) {
+        const sealed = c.store.settings().github_token;
+        if (sealed.len == 0) return c.res.json(200, .{ .has_token = false, .repos = &[_]github.Repo{}, .@"error" = "" });
+        const token = crypto.open(c.a, c.panel.key, sealed) catch return c.res.fail(500, "the GitHub token could not be decrypted");
+        const client: github.Client = .{ .gpa = c.a, .io = c.panel.io, .token = token };
+        const list = client.repos(c.a) catch |e| return c.res.json(200, .{
+            .has_token = true,
+            .repos = &[_]github.Repo{},
+            .@"error" = switch (e) {
+                error.GitHubDenied => "GitHub refused the token",
+                else => @errorName(e),
+            },
+        });
+        return c.res.json(200, .{ .has_token = true, .repos = list, .@"error" = "" });
+    }
     if (seg.len == 0 and method(c, "GET")) {
         return c.res.json(200, .{
             .has_token = c.store.settings().github_token.len > 0,

@@ -282,7 +282,13 @@ function DeployCard({ svc, d, active }) {
     ].filter(Boolean))
   return (
     <div class={`deploy${active ? ' active' : ''}${failed ? ' failed' : ''}${deploying ? ' running' : ''}`}>
-      <div class="main">
+      <div
+        class="main clickable"
+        onClick={(e) => {
+          if (e.target instanceof Element && e.target.closest('button')) return
+          setQuery({ logs: d.number, logtab: 'details' })
+        }}
+      >
         <span class={`deploy-badge ${b.color}`}>
           {b.spin && <span class="status-spin" />}
           {b.label}
@@ -337,7 +343,7 @@ function DeployCard({ svc, d, active }) {
       {failed && d.reason && (
         <div class="state failed-reason">
           <CircleX width={15} height={15} />
-          <span>{d.reason}</span>
+          <span>{d.reason.charAt(0).toUpperCase() + d.reason.slice(1)}</span>
         </div>
       )}
     </div>
@@ -726,7 +732,7 @@ function addVolume(svc) {
   })
 }
 
-function removeService(svc) {
+export function removeService(svc) {
   openForm({
     title: `Delete ${svc.name}?`,
     submit: 'Delete service',
@@ -1115,7 +1121,7 @@ export function ServicePanel() {
           {tab === 'settings' && <Settings svc={svc} />}
         </div>
       </aside>
-      {p.logs && <LogsView />}
+      {p.logs && <LogsView svc={svc} />}
     </>
   )
 }
