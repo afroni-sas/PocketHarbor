@@ -28,6 +28,8 @@
 #                           the checksums are read from its SHA256SUMS* files
 #   -h, --help
 #
+# uninstall.sh, next to this script in each release, removes it again.
+#
 # Other variables: PHARBOR_RELEASE_URL and POCKETDOCK_RELEASE_URL replace the
 # download locations; PHARBOR_GITHUB_TOKEN, GITHUB_TOKEN or GH_TOKEN reach a
 # private repository.
@@ -42,6 +44,8 @@ VERSION=${PHARBOR_VERSION:-}
 INSTALL_DIR=${PHARBOR_INSTALL_DIR:-}
 DATA=${PHARBOR_ROOT:-}
 PORT=${PHARBOR_PORT:-}
+PORT_GIVEN=0
+[ -z "$PORT" ] || PORT_GIVEN=1
 BIND=${PHARBOR_BIND:-}
 EMAIL=${PHARBOR_EMAIL:-}
 PASSWORD=${PHARBOR_PASSWORD:-}
@@ -94,6 +98,8 @@ Each option has a variable: PHARBOR_YES, PHARBOR_VERSION, PHARBOR_INSTALL_DIR,
 PHARBOR_ROOT, PHARBOR_PORT, PHARBOR_BIND, PHARBOR_EMAIL, PHARBOR_PASSWORD,
 PHARBOR_DOMAIN, PHARBOR_PANEL_DOMAIN, PHARBOR_TUNNEL_TOKEN, PHARBOR_BOOT,
 PHARBOR_START. A private repository is read with gh's token or GITHUB_TOKEN.
+
+To remove PocketHarbor: sh uninstall.sh (it keeps the data unless --purge).
 USAGE
 }
 
@@ -291,7 +297,7 @@ install_binary() {
         if [ "$1" = "$REPO" ] && [ -z "$TOKEN" ] && [ -z "$FROM" ] && [ -z "${4:-}" ]; then
             die "could not download $2. The repository is private: set GITHUB_TOKEN to a token that can read $REPO, or sign in with gh."
         fi
-        die "could not download $2"
+        die "could not download $2. Check the connection${VERSION:+, and that release $VERSION exists}."
     }
     if [ -n "$FROM" ]; then
         # The checksums of both releases: SHA256SUMS, SHA256SUMS.pdock...
@@ -301,7 +307,7 @@ install_binary() {
     fi
     expected=$(grep " $2\$" "$WORK/sums" | cut -d' ' -f1)
     [ -n "$expected" ] || die "SHA256SUMS has no entry for $2"
-    actual=$(sha256sum "$tmp" | cut -d' ' -f1)
+    actual=$(sha256 "$tmp")
     [ "$actual" = "$expected" ] || die "checksum mismatch for $2; nothing was installed"
     chmod 755 "$tmp"
     "$tmp" version >/dev/null 2>&1 || die "$2 cannot run on this device"
@@ -316,6 +322,14 @@ PH() {
         POCKETDOCK_ROOT=$ENGINE_ROOT PHARBOR_ROOT=$DATA PDOCK_BIN="$INSTALL_DIR/pdock" "$INSTALL_DIR/pharbor" "$@"
     else
         PHARBOR_ROOT=$DATA PDOCK_BIN="$INSTALL_DIR/pdock" "$INSTALL_DIR/pharbor" "$@"
+    fi
+}
+
+PD() {
+    if [ -n "$ENGINE_ROOT" ]; then
+        POCKETDOCK_ROOT=$ENGINE_ROOT "$INSTALL_DIR/pdock" "$@"
+    else
+        "$INSTALL_DIR/pdock" "$@"
     fi
 }
 
@@ -341,6 +355,140 @@ has_owner() {
 
 random_password() {
     tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 20
+}
+
+# Checks -----------------------------------------------------------------------
+
+# listening PORT: true when a program listens on PORT. The kernel's table
+# first; Android 10 and later hide it from apps, so then ss or netstat, and
+# at last a connection attempt.
+listening() {
+    hex=$(printf ':%04X' "$1")
+    readable=0
+    for f in /proc/net/tcp /proc/net/tcp6; do
+        table=$(cat "$f" 2>/dev/null) || continue
+        [ "$(printf '%s\n' "$table" | wc -l)" -gt 1 ] || continue
+        readable=1
+        printf '%s\n' "$table" | awk -v h="$hex" 'NR > 1 && $4 == "0A" && substr($2, length($2) - 4) == h { found = 1 } END { exit !found }' && return 0
+    done
+    [ $readable = 0 ] || return 1
+    if command -v ss >/dev/null 2>&1 && out=$(ss -ltn 2>/dev/null); then
+        printf '%s\n' "$out" | awk 'NR > 1 { print $4 }' | grep -qE "[:.]$1\$"
+        return
+    fi
+    if command -v netstat >/dev/null 2>&1 && out=$(netstat -ltn 2>/dev/null) && [ -n "$out" ]; then
+        printf '%s\n' "$out" | awk '{ print $4 }' | grep -qE "[:.]$1\$"
+        return
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        code=0
+        curl -s -o /dev/null -m 2 "http://127.0.0.1:$1/" 2>/dev/null || code=$?
+        # 7: nothing accepted the connection.
+        [ $code != 7 ]
+        return
+    fi
+    return 1
+}
+
+# The program listening on PORT, when the system says.
+port_owner() {
+    command -v ss >/dev/null 2>&1 || return 0
+    ss -ltnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" { print $NF; exit }' | sed -n 's/.*(("\([^"]*\)".*/\1/p'
+}
+
+# True when PORT is the one this installation's proxy already holds.
+own_port() {
+    proxy_pid >/dev/null || return 1
+    [ "$(sed -n 's/.*"proxy_port": *\([0-9]*\).*/\1/p' "$DATA/settings.json" 2>/dev/null | head -n 1)" = "$1" ]
+}
+
+# What is wrong with PORT, or nothing.
+port_problem() {
+    case "$1" in '' | *[!0-9]*)
+        echo "The port must be a number."
+        return
+        ;;
+    esac
+    if [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
+        echo "The port must be between 1 and 65535."
+        return
+    fi
+    if [ "$1" -lt 1024 ] && [ "$(id -u)" != 0 ]; then
+        echo "Ports below 1024 need root; choose 1024 or above."
+        return
+    fi
+    own_port "$1" && return
+    if listening "$1"; then
+        who=$(port_owner "$1")
+        echo "Port $1 is already in use${who:+ by $who}."
+    fi
+}
+
+# The first free port from N on.
+free_port() {
+    p=$1
+    case "$p" in '' | *[!0-9]*) p=8080 ;; esac
+    [ "$p" -ge 1024 ] || p=8080
+    while [ "$p" -le 65535 ]; do
+        [ -n "$(port_problem "$p")" ] || {
+            echo "$p"
+            return
+        }
+        p=$((p + 1))
+    done
+    echo 8080
+}
+
+valid_email() {
+    case "$1" in
+        *' '* | *@*@* | @* | *@) return 1 ;;
+        *@*.*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# "https://App.Example.com/" → "app.example.com"; empty when it is not a name.
+clean_domain() {
+    d=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's#^[a-z]*://##; s#/.*$##; s#:[0-9]*$##; s#\.$##')
+    case "$d" in
+        '' | *[!a-z0-9.*-]* | .* | *..* | *-.* | *.-*) return 0 ;;
+        *.*) echo "$d" ;;
+    esac
+}
+
+# Makes DIR and checks that it can be written to.
+writable() {
+    mkdir -p "$1" 2>/dev/null && [ -w "$1" ] && [ -d "$1" ]
+}
+
+# Free space, in MB, where DIR is.
+free_mb() {
+    df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }'
+}
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        toybox sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+    fi
+}
+
+# Waits for the dashboard to answer on this device.
+answers() {
+    i=0
+    while [ $i -lt 50 ]; do
+        if command -v curl >/dev/null 2>&1; then
+            curl -fs -o /dev/null -m 2 "http://127.0.0.1:$1/api/status" 2>/dev/null && return 0
+        elif wget -q -T 2 -O /dev/null "http://127.0.0.1:$1/api/status" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+        i=$((i + 1))
+    done
+    return 1
 }
 
 systemd_unit() {
@@ -408,7 +556,7 @@ main() {
             --version) need "$@"; VERSION=$2; shift ;;
             --dir) need "$@"; INSTALL_DIR=$2; shift ;;
             --data) need "$@"; DATA=$2; shift ;;
-            --port) need "$@"; PORT=$2; shift ;;
+            --port) need "$@"; PORT=$2; PORT_GIVEN=1; shift ;;
             --local-only) BIND=127.0.0.1 ;;
             --email) need "$@"; EMAIL=$2; shift ;;
             --domain) need "$@"; DOMAIN=$2; shift ;;
@@ -436,6 +584,10 @@ main() {
     case "$PLATFORM" in
         adb | android) [ -n "$ENGINE_ROOT" ] || ENGINE_ROOT=/data/local/tmp/pocketharbor/engine ;;
     esac
+    # An earlier install keeps its port.
+    if [ -z "$PORT" ] && [ -f "$DATA/settings.json" ]; then
+        PORT=$(sed -n 's/.*"proxy_port": *\([0-9]*\).*/\1/p' "$DATA/settings.json" | head -n 1)
+    fi
     [ -n "$PORT" ] || PORT=8080
     [ -n "$BIND" ] || BIND=0.0.0.0
     if [ -z "$FROM" ] && ! have_fetcher; then
@@ -454,17 +606,40 @@ main() {
 
     if interactive; then
         step "A few questions (Enter keeps the value in brackets)"
-        ask INSTALL_DIR "Install the programs in" "$INSTALL_DIR"
-        ask DATA "Keep the data in" "$DATA"
+        while :; do
+            ask INSTALL_DIR "Install the programs in" "$INSTALL_DIR"
+            writable "$INSTALL_DIR" && break
+            say "${RED}Cannot write to $INSTALL_DIR.$RESET Choose a folder of yours$( [ "$(id -u)" = 0 ] || echo ', or run the installer as root')."
+            INSTALL_DIR=$(default_install_dir)
+        done
+        while :; do
+            ask DATA "Keep the data in" "$DATA"
+            writable "$DATA" && break
+            say "${RED}Cannot write to $DATA.$RESET Choose another folder."
+            DATA=$(default_data_dir)
+        done
         [ -f "$DATA/settings.json" ] && upgrade=1
-        ask PORT "Port of the proxy and the dashboard" "$PORT"
+        [ $upgrade = 0 ] || say "${DIM}An installation is already there: it is updated, and its data and settings stay.$RESET"
+        while :; do
+            ask PORT "Port of the proxy and the dashboard" "$PORT"
+            problem=$(port_problem "$PORT")
+            [ -n "$problem" ] || break
+            say "${RED}$problem$RESET"
+            PORT=$(free_port "$PORT")
+            say "Port $PORT is free; press Enter to take it."
+        done
         if [ "$BIND" = 0.0.0.0 ]; then local_default=n; else local_default=y; fi
         if agree "Only reachable from this device (choose this with a tunnel)?" "$local_default"; then BIND=127.0.0.1; else BIND=0.0.0.0; fi
         if [ $upgrade = 1 ] && [ -x "$INSTALL_DIR/pharbor" ] && has_owner; then
             say "${DIM}The owner account already exists.$RESET"
             EMAIL=""
         elif agree "Create the owner account now (otherwise the first visit does)?" y; then
-            ask EMAIL "Email" "$EMAIL"
+            while :; do
+                ask EMAIL "Email" "$EMAIL"
+                valid_email "$EMAIL" && break
+                say "${RED}That is not an email address.$RESET"
+                EMAIL=""
+            done
             while :; do
                 secret PASSWORD "Password (8 characters or more)"
                 [ ${#PASSWORD} -ge 8 ] || {
@@ -478,10 +653,35 @@ main() {
         else
             EMAIL=""
         fi
-        ask DOMAIN "Domain for the services, as NAME.DOMAIN (empty for none)" "$DOMAIN"
-        ask PANEL_DOMAIN "Domain of the dashboard (empty for none)" "$PANEL_DOMAIN"
+        while :; do
+            ask DOMAIN "Domain for the services, as NAME.DOMAIN (empty for none)" "$DOMAIN"
+            [ -n "$DOMAIN" ] || break
+            d=$(clean_domain "$DOMAIN")
+            if [ -n "$d" ]; then
+                DOMAIN=$d
+                break
+            fi
+            say "${RED}\"$DOMAIN\" is not a domain name, like apps.example.com.$RESET"
+            DOMAIN=""
+        done
+        while :; do
+            ask PANEL_DOMAIN "Domain of the dashboard (empty for none)" "$PANEL_DOMAIN"
+            [ -n "$PANEL_DOMAIN" ] || break
+            d=$(clean_domain "$PANEL_DOMAIN")
+            if [ -n "$d" ]; then
+                PANEL_DOMAIN=$d
+                break
+            fi
+            say "${RED}\"$PANEL_DOMAIN\" is not a domain name, like harbor.example.com.$RESET"
+            PANEL_DOMAIN=""
+        done
         if agree "Connect a Cloudflare tunnel now (needs its token)?" n; then
-            secret TUNNEL_TOKEN "Tunnel token"
+            while :; do
+                secret TUNNEL_TOKEN "Tunnel token (Zero Trust > Networks > Tunnels > your tunnel)"
+                [ ${#TUNNEL_TOKEN} -ge 40 ] && break
+                [ -n "$TUNNEL_TOKEN" ] || break
+                say "${RED}That is too short for a tunnel token; paste the whole token, or press Enter to skip.$RESET"
+            done
         fi
         if can_boot; then
             if agree "Start PocketHarbor when the device boots?" y; then BOOT=1; else BOOT=0; fi
@@ -491,8 +691,36 @@ main() {
         fi
     fi
 
-    case "$PORT" in '' | *[!0-9]*) die "the port must be a number" ;; esac
-    [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "the port must be between 1 and 65535"
+    writable "$INSTALL_DIR" || die "cannot write to $INSTALL_DIR; choose another folder with --dir$( [ "$(id -u)" = 0 ] || echo ', or run as root')"
+    writable "$DATA" || die "cannot write to $DATA; choose another folder with --data"
+    problem=$(port_problem "$PORT")
+    if [ -n "$problem" ]; then
+        case "$problem" in
+            *"in use"*)
+                [ $PORT_GIVEN = 0 ] || die "$problem Choose another one with --port, for instance --port $(free_port "$PORT")."
+                PORT=$(free_port "$PORT")
+                say "$problem PocketHarbor takes port $PORT instead."
+                ;;
+            *) die "$problem" ;;
+        esac
+    fi
+    if [ -n "$EMAIL" ]; then valid_email "$EMAIL" || die "\"$EMAIL\" is not an email address"; fi
+    if [ -n "$DOMAIN" ]; then
+        d=$(clean_domain "$DOMAIN")
+        [ -n "$d" ] || die "\"$DOMAIN\" is not a domain name, like apps.example.com"
+        DOMAIN=$d
+    fi
+    if [ -n "$PANEL_DOMAIN" ]; then
+        d=$(clean_domain "$PANEL_DOMAIN")
+        [ -n "$d" ] || die "\"$PANEL_DOMAIN\" is not a domain name, like harbor.example.com"
+        PANEL_DOMAIN=$d
+    fi
+    if [ -n "$PASSWORD" ] && [ ${#PASSWORD} -lt 8 ]; then die "the password needs 8 characters or more"; fi
+    space=$(free_mb "$DATA")
+    if [ -n "$space" ]; then
+        [ "$space" -ge 200 ] || die "only $space MB are free in $DATA; PocketHarbor and the images of its services need at least 200 MB"
+        [ "$space" -ge 1024 ] || say "${DIM}Only $space MB are free in $DATA: a few images will fill it.$RESET"
+    fi
     if [ -n "$EMAIL" ] && [ -z "$PASSWORD" ]; then
         PASSWORD=$(random_password)
         [ ${#PASSWORD} -ge 8 ] || die "could not generate a password; set PHARBOR_PASSWORD"
@@ -503,7 +731,6 @@ main() {
     fi
 
     step "Installing"
-    mkdir -p "$INSTALL_DIR" "$DATA" || die "cannot create $INSTALL_DIR or $DATA"
     WORK=$(mktemp -d "$INSTALL_DIR/.pocketharbor-install.XXXXXX" 2>/dev/null) || {
         WORK="$INSTALL_DIR/.pocketharbor-install.$$"
         mkdir -p "$WORK"
@@ -580,7 +807,22 @@ main() {
             i=$((i + 1))
         done
         proxy_pid >/dev/null || die "PocketHarbor did not start; try: PHARBOR_ROOT=$DATA $INSTALL_DIR/pharbor serve"
-        ok "running on $BIND:$PORT"
+        if answers "$PORT"; then
+            ok "running on $BIND:$PORT"
+        else
+            say "${RED}PocketHarbor started but the dashboard does not answer on port $PORT yet.$RESET Its log:"
+            tail -n 15 "$DATA/proxy.log" 2>/dev/null || true
+        fi
+        # Services that uninstall.sh stopped, when it kept the data.
+        if [ -f "$DATA/stopped-by-uninstall" ]; then
+            back=0
+            while IFS= read -r name; do
+                [ -n "$name" ] || continue
+                PD start "$name" >/dev/null 2>&1 && back=$((back + 1))
+            done <"$DATA/stopped-by-uninstall"
+            rm -f "$DATA/stopped-by-uninstall"
+            [ $back = 0 ] || ok "started $back services again"
+        fi
         if [ -n "$TUNNEL_TOKEN" ]; then
             PH tunnel start "$TUNNEL_TOKEN" >/dev/null && ok "Cloudflare tunnel started" || say "The tunnel did not start; see: pharbor tunnel status"
         fi
