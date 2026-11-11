@@ -15,6 +15,8 @@ const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
 const metrics = @import("metrics.zig");
+const ws = @import("ws.zig");
+const terminal = @import("terminal.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -719,6 +721,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         const out = try c.eng.output(&.{ "logs", "--tail", tail, svc.container });
         return c.res.send(200, "text/plain; charset=utf-8", out.text);
     }
+    if (eql(what, "terminal") and method(c, "GET")) return openTerminal(c, svc);
     if (eql(what, "metrics") and method(c, "GET")) {
         const range = std.fmt.parseInt(i64, c.req.param("range") orelse "3600", 10) catch return c.res.fail(400, "range is in seconds");
         const series = try metrics.query(c.a, c.store, id, std.math.clamp(range, 300, 7 * 86400), nowS(), 240);
@@ -731,6 +734,26 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         return c.res.send(200, "application/x-ndjson", lastLines(data, n));
     }
     c.res.fail(404, "not found");
+}
+
+/// Browsers send cookies with a WebSocket handshake from any site, and
+/// without a preflight: the Origin header is all that tells them apart.
+fn fromThisOrigin(c: *Ctx) bool {
+    const origin = c.req.header("origin") orelse return false;
+    const host = c.req.header("x-forwarded-host") orelse c.req.header("host") orelse return false;
+    const scheme_end = std.mem.indexOf(u8, origin, "://") orelse return false;
+    return eql(origin[scheme_end + 3 ..], host);
+}
+
+fn openTerminal(c: *Ctx, svc: Service) !void {
+    if (c.who.token == null and !fromThisOrigin(c)) return c.res.fail(403, "the terminal only opens from this dashboard");
+    const key = c.req.header("sec-websocket-key") orelse return c.res.fail(400, "this is a WebSocket");
+    if (svc.container.len == 0) return c.res.fail(409, "the service is not deployed");
+    const info = c.eng.inspect(svc.container) orelse return c.res.fail(409, "the service is not running");
+    if (!info.running()) return c.res.fail(409, "the service is not running");
+    const fd = c.res.hijack();
+    ws.handshake(fd, key) catch return;
+    terminal.session(c.a, fd, c.panel.pdock, c.panel.envp, svc.container);
 }
 
 const LogLine = struct { t: i64, service: []const u8, stream: []const u8, text: []const u8 };

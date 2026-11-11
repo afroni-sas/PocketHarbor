@@ -2,9 +2,12 @@
 const Asset = @import("api.zig").Asset;
 
 pub const files = [_]Asset{
-    .{ .path = "/assets/index-C4lAAyG_.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-C4lAAyG_.css") },
-    .{ .path = "/assets/index-DjpV5r1O.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-DjpV5r1O.js") },
+    .{ .path = "/assets/addon-fit-DIOBYJe3.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/addon-fit-DIOBYJe3.js") },
+    .{ .path = "/assets/index-KczZJDUa.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-KczZJDUa.js") },
+    .{ .path = "/assets/index-rjXxc4Ou.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-rjXxc4Ou.css") },
     .{ .path = "/assets/inter-latin-wght-normal-Dx4kXJAl.woff2", .type = "font/woff2", .body = @embedFile("web/assets/inter-latin-wght-normal-Dx4kXJAl.woff2") },
+    .{ .path = "/assets/xterm-C8z0-R2m.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/xterm-C8z0-R2m.js") },
+    .{ .path = "/assets/xterm-sLQPUA_C.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/xterm-sLQPUA_C.css") },
     .{ .path = "/icon.svg", .type = "image/svg+xml", .body = @embedFile("web/icon.svg") },
     .{ .path = "/index.html", .type = "text/html; charset=utf-8", .body = @embedFile("web/index.html") },
 };

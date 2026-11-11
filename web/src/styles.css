@@ -423,6 +423,12 @@ pre.card { padding: 14px; }
 .svc-tag { font: inherit; font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--gray-50); color: var(--gray-700); cursor: pointer; white-space: nowrap; }
 .svc-tag:hover { border-color: var(--gray-300); color: var(--fg); }
 
+
+/* Console */
+.console-wrap { display: flex; flex-direction: column; }
+.console { height: calc(100vh - 260px); min-height: 280px; padding: 8px 4px 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: #13111c; overflow: hidden; }
+.console .xterm-viewport { scrollbar-width: thin; }
+
 /* Phones */
 @media (max-width: 760px) {
   .sidebar { display: none; }
@@ -446,6 +452,7 @@ pre.card { padding: 14px; }
   .http-row { grid-template-columns: 1fr; gap: 0; padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
   .http-row.head { display: none; }
   .charts.three { grid-template-columns: 1fr; }
+  .console { height: calc(100vh - 230px); }
   .env-line { grid-template-columns: auto 1fr; }
   .env-line .text { grid-column: 1 / -1; }
   .page-head .segmented { order: 3; }
