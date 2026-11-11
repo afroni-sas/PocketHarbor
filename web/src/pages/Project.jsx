@@ -2,18 +2,20 @@
 // which holds the canvas and the service panel, or the project settings.
 
 import { computed, effect, untracked } from '@preact/signals'
-import { Activity, Check, ChevronsUpDown, Copy, LayoutGrid, Layers, Network, Plus, Rocket, ScrollText, Settings, Trash, User } from 'lucide-preact'
+import { Activity, Braces, Check, ChevronsUpDown, Copy, Layers, LayoutGrid, Network, Plus, Rocket, ScrollText, Settings, Trash, TriangleExclamationPoint, User } from 'lucide-preact'
 import { del, enc, post } from '../api.js'
 import { me, projects, toast } from '../state.js'
 import { follow, navigate, withQuery } from '../router.js'
 import { applyChanges, dirty, loadProject, page, project, projectPath } from '../project.js'
-import { confirm, openForm, openMenu, timeAgo } from '../ui.jsx'
+import { confirm, copy, openForm, openMenu, timeAgo } from '../ui.jsx'
 import { Canvas, CanvasOverlay } from './Canvas.jsx'
 import { ServicePanel } from './ServicePanel.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { newProject } from './Dashboard.jsx'
+import { SettingsLayout } from './SettingsLayout.jsx'
 import { Observability } from './Metrics.jsx'
 import { ProjectLogs } from './ProjectLogs.jsx'
+import { TopActions } from './Activity.jsx'
 
 /** The project's pages, as in Railway's top bar. */
 const pages = [
@@ -107,6 +109,7 @@ function Topbar({ p }) {
         <ChevronsUpDown />
       </button>
       <span class="spacer" />
+      <TopActions />
       <nav class="top-tabs">
         {pages.map(([view, path, label, Icon]) => (
           <a key={view} href={projectPath(path)} onClick={follow} class={p.view === view ? 'active' : ''} aria-label={label}>
@@ -200,79 +203,93 @@ function removeProject(name) {
   })
 }
 
+const projectSections = [
+  ['general', 'General', Settings],
+  ['environments', 'Environments', Layers],
+  ['variables', 'Shared Variables', Braces],
+  ['danger', 'Danger', TriangleExclamationPoint],
+]
+
 function ProjectSettings({ p }) {
   const info = project.value
   const base = sharedBase.value
+  const tab = projectSections.some(([id]) => id === p.section) ? p.section : 'general'
+  const select = (id) => navigate(projectPath('/settings', { section: id === 'general' ? undefined : id }), true)
   return (
     <div class="stage-page">
-      <div class="page" style="max-width:860px;padding-top:36px">
-        <div class="page-head">
-          <h1>Project Settings</h1>
-        </div>
-
-        <section class="card card-pad set-card">
-          <h3>General</h3>
-          <div class="row">
-            <div class="field" style="flex:1">
-              <label>Project name</label>
+      <SettingsLayout title="Project Settings" items={projectSections} current={tab} onSelect={select}>
+        {tab === 'general' && (
+          <section class="card card-pad set-card">
+            <h3>Project Info</h3>
+            <div class="field">
+              <label>Name</label>
               <div class="code-box">
                 {p.project}
                 <span class="spacer" />
-                <button class="btn ghost icon sm" aria-label="Copy" onClick={() => navigator.clipboard?.writeText(p.project)}>
+                <button class="btn ghost icon sm" aria-label="Copy the name" onClick={() => copy(p.project)}>
                   <Copy />
                 </button>
               </div>
+              <span class="hint">Services reach each other by their private names, built from it: {p.project}-SERVICE.</span>
             </div>
-          </div>
-          {info && <p class="muted small" style="margin:10px 0 0">Created {timeAgo(info.created_at)}.</p>}
-        </section>
-
-        <section class="card card-pad set-card">
-          <div class="row" style="margin-bottom:12px">
-            <h3 style="margin:0">Environments</h3>
-            <span class="spacer" />
-            <button class="btn sm" onClick={newEnvironment}>
-              <Plus /> New environment
-            </button>
-          </div>
-          {(info ? info.environments : []).map((e) => (
-            <div class="domain-row" key={e}>
-              <span class={`env-chip${e === 'production' ? '' : ' other'}`} />
-              <a href={envPath(e)} onClick={follow}>
-                <b>{e}</b>
-              </a>
-              {e === p.env && <span class="badge">current</span>}
+            {info && (
+              <p class="muted small" style="margin:14px 0 0">
+                Created {timeAgo(info.created_at)} · {info.environments.length} environment{info.environments.length === 1 ? '' : 's'}
+              </p>
+            )}
+          </section>
+        )}
+        {tab === 'environments' && (
+          <section class="card card-pad set-card">
+            <div class="row" style="margin-bottom:12px">
+              <h3 style="margin:0">Environments</h3>
               <span class="spacer" />
-              {e !== 'production' && (
-                <button class="btn ghost icon sm" aria-label={`Delete ${e}`} onClick={() => removeEnvironment(e)}>
-                  <Trash />
-                </button>
-              )}
+              <button class="btn sm" onClick={newEnvironment}>
+                <Plus /> New environment
+              </button>
             </div>
-          ))}
-        </section>
-
-        <section class="card card-pad set-card">
-          <h3>Shared Variables</h3>
-          <p class="muted small" style="margin:-6px 0 14px">
-            Variables of <b>{p.env}</b> that services use with {'${{ shared.NAME }}'}.
-          </p>
-          {base && <VariablesEditor base={base} title="Shared Variables" />}
-        </section>
-
-        <section class="card card-pad set-card danger-card">
-          <h3>Danger</h3>
-          <div class="row">
-            <div style="flex:1">
-              <b>Delete project</b>
-              <p class="muted small" style="margin:2px 0 0">Removes the project and everything in it.</p>
+            <p class="muted small" style="margin:0 0 12px">Each one has its own services, variables, volumes and domains.</p>
+            {(info ? info.environments : []).map((e) => (
+              <div class="domain-row" key={e}>
+                <span class={`env-chip${e === 'production' ? '' : ' other'}`} />
+                <a href={envPath(e)} onClick={follow}>
+                  <b>{e}</b>
+                </a>
+                {e === p.env && <span class="badge">current</span>}
+                <span class="spacer" />
+                {e !== 'production' && (
+                  <button class="btn ghost icon sm" aria-label={`Delete ${e}`} onClick={() => removeEnvironment(e)}>
+                    <Trash />
+                  </button>
+                )}
+              </div>
+            ))}
+          </section>
+        )}
+        {tab === 'variables' && (
+          <section class="card card-pad set-card">
+            <h3>Shared Variables</h3>
+            <p class="muted small" style="margin:-6px 0 14px">
+              Variables of <b>{p.env}</b> that services use with {'${{ shared.NAME }}'}.
+            </p>
+            {base && <VariablesEditor base={base} title="Shared Variables" />}
+          </section>
+        )}
+        {tab === 'danger' && (
+          <section class="card card-pad set-card danger-card">
+            <h3>Danger</h3>
+            <div class="row">
+              <div style="flex:1">
+                <b>Delete project</b>
+                <p class="muted small" style="margin:2px 0 0">Removes every environment, service, deployment, volume, backup and variable of {p.project}.</p>
+              </div>
+              <button class="btn danger" onClick={() => removeProject(p.project)}>
+                <Trash /> Delete project
+              </button>
             </div>
-            <button class="btn danger" onClick={() => removeProject(p.project)}>
-              <Trash /> Delete project
-            </button>
-          </div>
-        </section>
-      </div>
+          </section>
+        )}
+      </SettingsLayout>
     </div>
   )
 }

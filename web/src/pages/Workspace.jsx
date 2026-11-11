@@ -2,11 +2,12 @@
 // registries and the people who can sign in.
 
 import { effect, signal, untracked } from '@preact/signals'
-import { Copy, Eye, EyeOff, Plus, Server, Trash } from 'lucide-preact'
+import { Bell, Cloud, Copy, Eye, EyeOff, Plus, Server, Settings as SettingsIcon, Trash, Users } from 'lucide-preact'
 import { del, get, patch, post, put } from '../api.js'
 import { me, toast } from '../state.js'
 import { navigate, route, withQuery } from '../router.js'
-import { attempt, confirm, copy, openForm, Spinner, timeAgo } from '../ui.jsx'
+import { attempt, confirm, copy, GithubIcon, openForm, Spinner, timeAgo } from '../ui.jsx'
+import { SettingsLayout } from './SettingsLayout.jsx'
 import { Alerts } from './Alerts.jsx'
 
 const data = signal({ settings: null, github: null, tunnel: null, registries: null, users: null, services: null })
@@ -36,12 +37,12 @@ async function load(tab) {
 }
 
 const tabs = [
-  ['general', 'General'],
-  ['networking', 'Public access'],
-  ['github', 'GitHub'],
-  ['registries', 'Registries'],
-  ['alerts', 'Alerts'],
-  ['members', 'Members'],
+  ['general', 'General', SettingsIcon],
+  ['networking', 'Public access', Cloud],
+  ['github', 'GitHub', GithubIcon],
+  ['registries', 'Registries', Server],
+  ['alerts', 'Alerts', Bell],
+  ['members', 'Members', Users],
 ]
 
 const currentTab = () => {
@@ -470,18 +471,8 @@ export function Workspace() {
   const tab = currentTab()
   const View = views[tab]
   return (
-    <div class="page" style="max-width:860px">
-      <div class="page-head">
-        <h1>Settings</h1>
-      </div>
-      <nav class="tabs" style="margin-bottom:22px">
-        {tabs.map(([id, label]) => (
-          <button key={id} class={`tab${tab === id ? ' active' : ''}`} onClick={() => navigate(withQuery('/settings', { tab: id === 'general' ? undefined : id }), true)}>
-            {label}
-          </button>
-        ))}
-      </nav>
+    <SettingsLayout title="Settings" items={tabs} current={tab} onSelect={(id) => navigate(withQuery('/settings', { tab: id === 'general' ? undefined : id }), true)}>
       <View />
-    </div>
+    </SettingsLayout>
   )
 }

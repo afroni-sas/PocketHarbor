@@ -7,7 +7,7 @@ import { enc, get } from '../api.js'
 import { me, services } from '../state.js'
 import { openService, page, serviceId } from '../project.js'
 import { ServiceIcon, Spinner, Status } from '../ui.jsx'
-import { bytes, Chart, colors, count, millis, percent, RangePicker } from './Chart.jsx'
+import { bytes, Chart, colors, count, millis, RangePicker, vcpu } from './Chart.jsx'
 
 /** Shared by the tab and the page, so switching keeps the range. */
 const range = signal(3600)
@@ -33,10 +33,10 @@ const one = (label, value) => [{ label, color: colors.single, value }]
 
 function chartsFor(svc) {
   return [
-    { id: 'cpu', title: 'CPU', series: one('CPU', (p) => p.cpu), format: percent },
+    { id: 'cpu', title: 'CPU', series: one('CPU', (p) => p.cpu / 100), format: vcpu },
     { id: 'mem', title: 'Memory', series: one('Memory', (p) => p.mem), format: bytes, binary: true },
-    { id: 'req', title: 'Requests', series: one('Requests', (p) => p.req), format: count, total: true },
-    { id: 'p95', title: 'Response time (p95)', series: one('p95', (p) => p.p95), format: millis },
+    { id: 'req', title: 'Requests', series: one('Requests', (p) => p.req), format: count, total: true, quiet: 'No requests in this range' },
+    { id: 'p95', title: 'Response time (p95)', series: one('p95', (p) => p.p95), format: millis, quiet: 'No requests in this range' },
     {
       id: 'net',
       title: 'Network',
@@ -101,7 +101,7 @@ function MetricsTable({ data, svc }) {
           {rows.map((p) => (
             <tr key={p.t}>
               <td>{new Date(p.t * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}</td>
-              <td>{percent(p.cpu)}</td>
+              <td>{vcpu(p.cpu / 100)}</td>
               <td>{bytes(p.mem)}</td>
               <td>{count(p.req)}</td>
               <td>{count(p.err)}</td>
@@ -125,11 +125,11 @@ export function MetricsTab({ svc }) {
   return (
     <div>
       <div class="row" style="margin-bottom:16px">
-        <RangePicker value={range.value} onChange={(v) => (range.value = v)} />
         <span class="spacer" />
         <button class={`btn sm${asTable.value ? ' active' : ''}`} aria-pressed={asTable.value} onClick={() => (asTable.value = !asTable.value)}>
           <Table /> Table
         </button>
+        <RangePicker value={range.value} onChange={(v) => (range.value = v)} />
       </div>
       {!data ? (
         <div class="empty">
@@ -161,6 +161,7 @@ export function MetricsTab({ svc }) {
                     to={data.to}
                     step={data.step}
                     summary={t ? `${count(t.req)} total · ${count(t.err)} 5xx` : undefined}
+                    quiet={ch.quiet}
                   />
                 )
               })}
@@ -198,7 +199,7 @@ effect(() => {
 function ServiceMetrics({ svc }) {
   const data = seriesOf(svc.id)
   const mini = [
-    { id: 'cpu', title: 'CPU', series: one('CPU', (p) => p.cpu), format: percent },
+    { id: 'cpu', title: 'CPU', series: one('CPU', (p) => p.cpu / 100), format: vcpu },
     { id: 'mem', title: 'Memory', series: one('Memory', (p) => p.mem), format: bytes, binary: true },
     { id: 'req', title: 'Requests', series: one('Requests', (p) => p.req), format: count },
   ]
