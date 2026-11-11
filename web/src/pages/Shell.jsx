@@ -1,6 +1,6 @@
-import { LayoutGrid, LogOut, Settings, User } from 'lucide-preact'
+import { Download, LayoutGrid, LogOut, Settings, User } from 'lucide-preact'
 import { post } from '../api.js'
-import { me } from '../state.js'
+import { installPrompt, me } from '../state.js'
 import { follow, route } from '../router.js'
 import { openMenu } from '../ui.jsx'
 
@@ -13,6 +13,14 @@ const items = [
 async function logout() {
   await post('/logout').catch(() => {})
   me.value = null
+}
+
+async function install() {
+  const prompt = installPrompt.peek()
+  if (!prompt) return
+  prompt.prompt()
+  await prompt.userChoice.catch(() => {})
+  installPrompt.value = null
 }
 
 export function Shell({ children }) {
@@ -35,6 +43,12 @@ export function Shell({ children }) {
             {label}
           </a>
         ))}
+        {installPrompt.value && (
+          <button class="nav-item" style="background:none;border:0;width:100%" onClick={install}>
+            <Download />
+            Install app
+          </button>
+        )}
         <div class="user">
           <span class="avatar">{email.slice(0, 1).toUpperCase()}</span>
           <span class="small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{email}</span>

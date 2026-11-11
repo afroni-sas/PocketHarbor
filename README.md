@@ -20,6 +20,9 @@ It shows each project as a canvas of services, with their deployments and logs,
 variables, volumes and backups, cron runs and settings, much like Railway. A
 domain set in Settings can reach it from outside, through a tunnel.
 
+It installs as an app (Add to Home screen) when opened over HTTPS, through
+a tunnel or a domain: browsers only allow that on secure origins.
+
 The interface lives in `web/` (Vite, Preact and signals). Its build is committed
 in `src/web/` and embedded in the binary, so `zig build` alone is enough. After
 changing it:

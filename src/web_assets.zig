@@ -2,12 +2,18 @@
 const Asset = @import("api.zig").Asset;
 
 pub const files = [_]Asset{
+    .{ .path = "/apple-touch-icon.png", .type = "image/png", .body = @embedFile("web/apple-touch-icon.png") },
     .{ .path = "/assets/addon-fit-DIOBYJe3.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/addon-fit-DIOBYJe3.js") },
     .{ .path = "/assets/index-BD3FuNOY.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-BD3FuNOY.css") },
-    .{ .path = "/assets/index-CIJA_r35.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-CIJA_r35.js") },
+    .{ .path = "/assets/index-BWKfiDGy.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-BWKfiDGy.js") },
     .{ .path = "/assets/inter-latin-wght-normal-Dx4kXJAl.woff2", .type = "font/woff2", .body = @embedFile("web/assets/inter-latin-wght-normal-Dx4kXJAl.woff2") },
     .{ .path = "/assets/xterm-C8z0-R2m.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/xterm-C8z0-R2m.js") },
     .{ .path = "/assets/xterm-sLQPUA_C.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/xterm-sLQPUA_C.css") },
+    .{ .path = "/icon-192.png", .type = "image/png", .body = @embedFile("web/icon-192.png") },
+    .{ .path = "/icon-512.png", .type = "image/png", .body = @embedFile("web/icon-512.png") },
     .{ .path = "/icon.svg", .type = "image/svg+xml", .body = @embedFile("web/icon.svg") },
     .{ .path = "/index.html", .type = "text/html; charset=utf-8", .body = @embedFile("web/index.html") },
+    .{ .path = "/manifest.webmanifest", .type = "application/manifest+json", .body = @embedFile("web/manifest.webmanifest") },
+    .{ .path = "/maskable-512.png", .type = "image/png", .body = @embedFile("web/maskable-512.png") },
+    .{ .path = "/sw.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/sw.js") },
 };
