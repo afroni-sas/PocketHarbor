@@ -12,6 +12,22 @@ pharbor deploy web --image nginx:alpine --port 80 --domain web.example.com
 pharbor tunnel quick web     # a temporary public https:// URL, no account needed
 ```
 
+## Dashboard
+
+`pharbor serve` also serves a web dashboard. Open `http://PHONE-ADDRESS:8080/`
+from a browser on the same network; the first visit creates the owner account.
+It shows each project as a canvas of services, with their deployments and logs,
+variables, volumes and backups, cron runs and settings, much like Railway. A
+domain set in Settings can reach it from outside, through a tunnel.
+
+The interface lives in `web/` (Vite, Preact and signals). Its build is committed
+in `src/web/` and embedded in the binary, so `zig build` alone is enough. After
+changing it:
+
+```sh
+cd web && pnpm install --frozen-lockfile && pnpm build
+```
+
 ## What it does
 
 | | |

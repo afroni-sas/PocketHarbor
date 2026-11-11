@@ -34,3 +34,30 @@ jobs:
 
       - name: Start
         run: ./zig-out/bin/pharbor version
+
+  web:
+    name: Web interface is built
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build
+        working-directory: web
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # The build is committed so that zig build needs no Node.
+      - name: The committed build matches the sources
+        run: |
+          git add -N src/web src/web_assets.zig
+          git diff --exit-code --stat -- src/web src/web_assets.zig
