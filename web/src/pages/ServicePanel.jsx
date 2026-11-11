@@ -36,6 +36,7 @@ import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, si
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { LogsView } from './Logs.jsx'
 import { MetricsTab } from './Metrics.jsx'
+import { ConsoleTab } from './Console.jsx'
 
 const deployments = signal({ id: '', list: null })
 const backups = signal({ id: '', volumes: null, list: null })
@@ -111,6 +112,8 @@ effect(() => {
 
 addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || e.defaultPrevented) return
+  // Escape belongs to the program in the terminal (vim, less...).
+  if (e.target instanceof Element && e.target.closest('.console')) return
   const p = page.peek()
   if (!p || !p.service || document.querySelector('.backdrop, .menu')) return
   if (p.logs) setQuery({ logs: undefined, logtab: undefined })
@@ -833,6 +836,7 @@ export function ServicePanel() {
     ['deployments', 'Deployments'],
     ['variables', 'Variables'],
     ['metrics', 'Metrics'],
+    !svc.cron && ['console', 'Console'],
     svc.volumes.length > 0 && ['backups', 'Backups'],
     svc.cron && ['runs', 'Cron Runs'],
     ['settings', 'Settings'],
@@ -869,6 +873,7 @@ export function ServicePanel() {
             />
           )}
           {tab === 'metrics' && <MetricsTab svc={svc} />}
+          {tab === 'console' && <ConsoleTab svc={svc} />}
           {tab === 'backups' && <Backups svc={svc} />}
           {tab === 'runs' && <Runs svc={svc} />}
           {tab === 'settings' && <Settings svc={svc} />}
