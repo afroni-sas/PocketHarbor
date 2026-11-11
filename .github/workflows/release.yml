@@ -1,0 +1,124 @@
+name: Release
+
+# A tag vX.Y.Z publishes a release. Pull requests that touch the release
+# files, and manual runs, do everything else and keep the files as an
+# artifact, so a broken release shows up before it is tagged.
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/release-notes.md'
+      - 'install.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    name: Build, try the installer, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version
+        run: |
+          version=$(sed -n 's/^pub const version = "\(.*\)";$/\1/p' src/version.zig)
+          if [ -z "$version" ]; then
+            echo "::error::No version in src/version.zig"
+            exit 1
+          fi
+          if ! grep -qF ".version = \"$version\"" build.zig.zon; then
+            echo "::error::build.zig.zon does not say version $version, as src/version.zig does"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in src/version.zig"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # Takes the version from minimum_zig_version in build.zig.zon.
+      - uses: mlugg/setup-zig@v2
+
+      - name: Run the unit tests
+        run: zig build test --summary all
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # The binary embeds src/web: it must be the build of web/.
+      - name: Check the embedded web interface
+        run: |
+          (cd web && pnpm install --frozen-lockfile && pnpm build)
+          git add -N src/web src/web_assets.zig
+          git diff --exit-code --stat -- src/web src/web_assets.zig
+
+      - name: Build for Android
+        run: zig build android
+
+      - name: Prepare the release files
+        run: |
+          mkdir dist
+          for abi in arm64-v8a x86_64; do
+            cp "zig-out/android/$abi/pharbor" "dist/pharbor-android-$abi"
+          done
+          cp install.sh dist/
+          (cd dist && sha256sum pharbor-android-* install.sh > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      # The static binaries run on any Linux, so the runner installs the
+      # release the way a phone would, with pdock from PocketDock's latest
+      # release.
+      - name: Try the installer
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          PHARBOR_RELEASE_URL="file://$PWD/dist" PHARBOR_PASSWORD=ci-password-1 \
+            sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --port 18080 \
+            --email ci@example.test --domain apps.example.test --no-boot
+          curl -fsS http://127.0.0.1:18080/api/status | tee status.json
+          grep -q '"setup_needed":false' status.json
+          curl -fsS -H 'Content-Type: application/json' -d '{"email":"ci@example.test","password":"ci-password-1"}' http://127.0.0.1:18080/api/login > /dev/null
+          "$RUNNER_TEMP/bin/pharbor" version | grep -F "pharbor $VERSION"
+          # Run again, as an update: the account stays and the proxy restarts.
+          PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --port 18080 --no-boot
+          curl -fsS -H 'Content-Type: application/json' -d '{"email":"ci@example.test","password":"ci-password-1"}' http://127.0.0.1:18080/api/login > /dev/null
+          kill -TERM "$(cut -d' ' -f1 "$RUNNER_TEMP/data/proxy.pid")"
+
+      - name: Keep the files of this run
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketharbor-${{ env.VERSION }}-${{ github.sha }}
+          path: dist/
+          retention-days: 7
+
+      - name: Write the release notes
+        if: github.ref_type == 'tag'
+        run: envsubst '$GITHUB_SHA $GITHUB_SERVER_URL $GITHUB_REPOSITORY $GITHUB_RUN_ID $GITHUB_REF_NAME' < .github/release-notes.md > notes.md
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "PocketHarbor $VERSION" --notes-file notes.md --generate-notes "${flags[@]}"
