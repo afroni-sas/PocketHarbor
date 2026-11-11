@@ -54,6 +54,16 @@ fn isAddress(host: []const u8) bool {
     return true;
 }
 
+/// The phone's own address and localhost reach the dashboard, even when a
+/// default service answers for every other name: otherwise starting a quick
+/// tunnel would lock the owner out of the dashboard. A service still gets
+/// an address that is one of its own domains.
+fn toPanelByAddress(host: []const u8, found: ?*const routes.Route) bool {
+    if (!isAddress(host)) return false;
+    const r = found orelse return true;
+    return std.mem.eql(u8, r.host, "*");
+}
+
 /// Must run before the pid file exists: SIGHUP would otherwise be fatal.
 pub fn installSignals() void {
     handle(.HUP, onHup);
@@ -418,10 +428,9 @@ pub const Proxy = struct {
         self.release(c);
 
         if (to_panel and self.table.panel_port != 0) return self.startUpstream(c, self.table.panel_port);
-        const r = self.table.lookup(host) orelse {
-            if (self.table.panel_port != 0 and isAddress(host)) return self.startUpstream(c, self.table.panel_port);
-            return self.respond(c, 404, "No service answers for this name.");
-        };
+        const found = self.table.lookup(host);
+        if (self.table.panel_port != 0 and toPanelByAddress(host, found)) return self.startUpstream(c, self.table.panel_port);
+        const r = found orelse return self.respond(c, 404, "No service answers for this name.");
         if (std.mem.eql(u8, r.service, routes.panel_service)) return self.startUpstream(c, r.port);
         c.service.set(r.service);
         const s = self.statFor(r.service);
@@ -668,3 +677,13 @@ pub const Proxy = struct {
         log.* = self.openLog(service) orelse .{ .fd = -1, .size = 0 };
     }
 };
+
+test "an address reaches the dashboard even with a default service" {
+    const any: routes.Route = .{ .host = "*", .service = "web", .port = 1 };
+    const own: routes.Route = .{ .host = "192.168.1.20", .service = "web", .port = 1 };
+    try std.testing.expect(toPanelByAddress("192.168.1.20", null));
+    try std.testing.expect(toPanelByAddress("192.168.1.20", &any));
+    try std.testing.expect(toPanelByAddress("localhost", &any));
+    try std.testing.expect(!toPanelByAddress("192.168.1.20", &own));
+    try std.testing.expect(!toPanelByAddress("abc.trycloudflare.com", &any));
+}
