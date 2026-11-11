@@ -1,7 +1,7 @@
 import { render } from 'preact'
 import './styles.css'
 import { get } from './api.js'
-import { me, status } from './state.js'
+import { installPrompt, me, status } from './state.js'
 import { route } from './router.js'
 import { Overlays, Spinner } from './ui.jsx'
 import { Login, Setup } from './pages/Auth.jsx'
@@ -40,6 +40,17 @@ async function boot() {
     me.value = null
   }
 }
+
+// Installing the app needs a secure origin: through a tunnel or a domain
+// with HTTPS, or localhost; not the phone's bare address.
+if ('serviceWorker' in navigator && isSecureContext) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {})
+}
+addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault()
+  installPrompt.value = e
+})
+addEventListener('appinstalled', () => (installPrompt.value = null))
 
 boot()
 render(

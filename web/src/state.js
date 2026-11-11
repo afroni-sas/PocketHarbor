@@ -27,3 +27,6 @@ export function toast(message, kind = 'info') {
 /** One dialog or menu at a time, described by a render function. */
 export const overlay = signal(null)
 export const closeOverlay = () => (overlay.value = null)
+
+/** Chrome's install prompt, kept until the user asks for it. */
+export const installPrompt = signal(null)
