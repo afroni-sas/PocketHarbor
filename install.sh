@@ -70,7 +70,31 @@ die() {
 }
 
 usage() {
-    sed -n '2,/^$/s/^# \{0,1\}//p' "$0" 2>/dev/null || say "See the comments at the top of install.sh."
+    cat <<'USAGE'
+Installs and sets up PocketHarbor and PocketDock. Without --yes it asks.
+
+  sh install.sh [options]
+
+  -y, --yes             no questions: defaults, options and PHARBOR_* variables
+  --version TAG         release to install, e.g. v0.1.0 (default: the latest)
+  --dir DIR             where pharbor and pdock go
+  --data DIR            data directory
+  --port N              port of the proxy and the dashboard (8080)
+  --local-only          listen on 127.0.0.1 only, for use with a tunnel
+  --email EMAIL         create the owner account; its password comes from
+                        PHARBOR_PASSWORD, is asked, or is generated
+  --domain DOMAIN       every service also answers at NAME.DOMAIN
+  --panel-domain HOST   where the dashboard answers
+  --tunnel-token TOKEN  start a Cloudflare tunnel
+  --boot, --no-boot     start at boot (Termux:Boot or systemd)
+  --no-start            install and set up, but do not start
+  --from DIR            take the files from DIR instead of GitHub (adb push)
+
+Each option has a variable: PHARBOR_YES, PHARBOR_VERSION, PHARBOR_INSTALL_DIR,
+PHARBOR_ROOT, PHARBOR_PORT, PHARBOR_BIND, PHARBOR_EMAIL, PHARBOR_PASSWORD,
+PHARBOR_DOMAIN, PHARBOR_PANEL_DOMAIN, PHARBOR_TUNNEL_TOKEN, PHARBOR_BOOT,
+PHARBOR_START. A private repository is read with gh's token or GITHUB_TOKEN.
+USAGE
 }
 
 # Questions ------------------------------------------------------------------
