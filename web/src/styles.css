@@ -448,6 +448,27 @@ pre.card { padding: 14px; }
 .template > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .template svg { flex: none; margin-top: 1px; }
 
+
+/* Data */
+.data-view { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 14px; min-height: calc(100vh - 240px); }
+.data-list { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); padding: 6px; overflow: auto; max-height: calc(100vh - 240px); }
+.data-list header { display: flex; align-items: center; padding: 2px 4px 6px 6px; }
+.data-item { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 8px; border: 0; border-radius: 5px; background: none; cursor: pointer; font-size: 12.5px; text-align: left; color: var(--gray-700); }
+.data-item:hover { background: var(--gray-100); color: var(--fg); }
+.data-item.on { background: var(--primary-soft); color: var(--primary-fg); }
+.data-item svg { flex: none; color: var(--muted); }
+.data-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.data-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.query { display: flex; flex-direction: column; gap: 8px; }
+.result-table { overflow: auto; max-height: calc(100vh - 420px); min-height: 120px; border: 1px solid var(--border); border-radius: var(--radius); }
+.result-table table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; width: max-content; min-width: 100%; }
+.result-table th { position: sticky; top: 0; background: var(--gray-50); text-align: left; font-weight: 600; color: var(--gray-700); }
+.result-table th, .result-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-table tr:hover td { background: var(--gray-50); }
+.result-text { margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: calc(100vh - 420px); overflow: auto; }
+.result-text.failed { border-color: var(--red-border); color: var(--red); }
+.result-foot { font-size: 12px; color: var(--muted); }
+
 /* Phones */
 @media (max-width: 760px) {
   .sidebar { display: none; }
@@ -472,6 +493,8 @@ pre.card { padding: 14px; }
   .http-row.head { display: none; }
   .charts.three { grid-template-columns: 1fr; }
   .thresholds { grid-template-columns: 1fr; }
+  .data-view { grid-template-columns: 1fr; }
+  .data-list { max-height: 180px; }
   .channel { flex-wrap: wrap; }
   .channel .what { flex-basis: calc(100% - 44px); }
   .console { height: calc(100vh - 230px); }

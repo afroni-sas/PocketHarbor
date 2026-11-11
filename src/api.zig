@@ -19,6 +19,7 @@ const ws = @import("ws.zig");
 const terminal = @import("terminal.zig");
 const alerts = @import("alerts.zig");
 const templates = @import("templates.zig");
+const dbview = @import("dbview.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -726,6 +727,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         return c.res.send(200, "text/plain; charset=utf-8", out.text);
     }
     if (eql(what, "terminal") and method(c, "GET")) return openTerminal(c, svc);
+    if (eql(what, "data")) return dataApi(c, svc, seg[2..]);
     if (eql(what, "metrics") and method(c, "GET")) {
         const range = std.fmt.parseInt(i64, c.req.param("range") orelse "3600", 10) catch return c.res.fail(400, "range is in seconds");
         const series = try metrics.query(c.a, c.store, id, std.math.clamp(range, 300, 7 * 86400), nowS(), 240);
@@ -736,6 +738,36 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         const data = sys.readFileAlloc(c.a, file, 1 << 26) catch "";
         const n = std.fmt.parseInt(usize, c.req.param("tail") orelse "500", 10) catch 500;
         return c.res.send(200, "application/x-ndjson", lastLines(data, n));
+    }
+    c.res.fail(404, "not found");
+}
+
+/// Past this, a query's output is cut: a browser table has its limits.
+const max_query_output = 2 << 20;
+
+fn dataApi(c: *Ctx, svc: Service, seg: []const []const u8) !void {
+    const kind = dbview.kindOf(svc.image) orelse return c.res.fail(409, "the data view knows PostgreSQL, MySQL, MariaDB, Redis and MongoDB");
+    if (svc.container.len == 0) return c.res.fail(409, "the database is not deployed");
+    const info = c.eng.inspect(svc.container) orelse return c.res.fail(409, "the database is not running");
+    if (!info.running()) return c.res.fail(409, "the database is not running");
+    if (seg.len == 0 and method(c, "GET")) {
+        const out = try c.eng.output(&.{ "exec", svc.container, "sh", "-c", dbview.listScript(kind) });
+        if (out.code != 0) return c.res.json(200, .{ .kind = kind, .items = &[_]dbview.Item{}, .@"error" = std.mem.trim(u8, out.text, " \n") });
+        return c.res.json(200, .{ .kind = kind, .items = try dbview.parseList(c.a, kind, out.text), .@"error" = "" });
+    }
+    if (seg.len == 1 and eql(seg[0], "query") and method(c, "POST")) {
+        const body = c.req.json(struct { query: []const u8 }) catch return c.res.fail(400, "send query");
+        if (std.mem.trim(u8, body.query, " \n\t").len == 0) return c.res.fail(400, "the query is empty");
+        var input = body.query;
+        if (input[input.len - 1] != '\n') input = try std.fmt.allocPrint(c.a, "{s}\n", .{input});
+        const out = try c.eng.outputWithInput(&.{ "exec", "-i", svc.container, "sh", "-c", dbview.queryScript(kind) }, input);
+        const cut = out.text.len > max_query_output;
+        return c.res.json(200, .{
+            .kind = kind,
+            .code = out.code,
+            .output = if (cut) out.text[0..max_query_output] else out.text,
+            .truncated = cut,
+        });
     }
     c.res.fail(404, "not found");
 }
