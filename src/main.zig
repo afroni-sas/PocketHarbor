@@ -20,6 +20,7 @@ const github = @import("github.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
+const metrics = @import("metrics.zig");
 const web_assets = @import("web_assets.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
@@ -345,6 +346,8 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     };
     const thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, scheduler.run, .{ c.store.root, c.envp });
     thread.detach();
+    const sampler = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, metrics.run, .{ c.store.root, c.eng.bin, c.envp });
+    sampler.detach();
     try httpd.serve(.{ .ip = .{ 127, 0, 0, 1 }, .port = s.panel_port }, api.handle, panel);
 }
 

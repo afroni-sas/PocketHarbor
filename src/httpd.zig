@@ -52,6 +52,12 @@ pub const Request = struct {
         return null;
     }
 
+    /// A query parameter with %XX and + decoded, for free text.
+    pub fn text(self: *const Request, name: []const u8) ?[]const u8 {
+        const raw = self.param(name) orelse return null;
+        return decodeQuery(self.a, raw) catch null;
+    }
+
     /// The client's address. Behind the local proxy, the one it reports.
     pub fn clientIp(self: *const Request) []const u8 {
         if (self.peer[0] == 127) {
@@ -230,4 +236,30 @@ pub fn serve(addr: net.Addr, handler: Handler, ctx: *anyopaque) !void {
         };
         thread.detach();
     }
+}
+
+pub fn decodeQuery(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    const out = try a.alloc(u8, raw.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) : (i += 1) {
+        const ch = raw[i];
+        if (ch == '+') {
+            out[n] = ' ';
+        } else if (ch == '%' and i + 2 < raw.len) {
+            out[n] = std.fmt.parseInt(u8, raw[i + 1 .. i + 3], 16) catch return error.BadEscape;
+            i += 2;
+        } else {
+            out[n] = ch;
+        }
+        n += 1;
+    }
+    return out[0..n];
+}
+
+test "decodeQuery" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("a b/é", try decodeQuery(arena.allocator(), "a+b%2F%C3%A9"));
+    try std.testing.expectError(error.BadEscape, decodeQuery(arena.allocator(), "%zz"));
 }

@@ -35,6 +35,7 @@ import { closeService, markDirty, page, privateName, refresh, serviceId, setQuer
 import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, size, Spinner, statusOf, timeAgo } from '../ui.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { LogsView } from './Logs.jsx'
+import { MetricsTab } from './Metrics.jsx'
 
 const deployments = signal({ id: '', list: null })
 const backups = signal({ id: '', volumes: null, list: null })
@@ -831,6 +832,7 @@ export function ServicePanel() {
   const tabs = [
     ['deployments', 'Deployments'],
     ['variables', 'Variables'],
+    ['metrics', 'Metrics'],
     svc.volumes.length > 0 && ['backups', 'Backups'],
     svc.cron && ['runs', 'Cron Runs'],
     ['settings', 'Settings'],
@@ -866,6 +868,7 @@ export function ServicePanel() {
               onChange={() => markDirty(svc)}
             />
           )}
+          {tab === 'metrics' && <MetricsTab svc={svc} />}
           {tab === 'backups' && <Backups svc={svc} />}
           {tab === 'runs' && <Runs svc={svc} />}
           {tab === 'settings' && <Settings svc={svc} />}

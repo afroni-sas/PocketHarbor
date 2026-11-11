@@ -14,6 +14,7 @@ const github = @import("github.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
+const metrics = @import("metrics.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -441,6 +442,9 @@ fn projects(c: *Ctx, seg: []const []const u8) !void {
         const copied = try deploy.duplicateEnvironment(c.store, c.vars, name, body.from, body.name);
         return c.res.json(201, .{ .name = body.name, .copied = copied });
     }
+    if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "logs") and method(c, "GET")) {
+        return environmentLogs(c, name, seg[2]);
+    }
     if (seg.len == 4 and eql(seg[1], "environments") and eql(seg[3], "edges") and method(c, "GET")) {
         return c.res.json(200, try edges(c, name, seg[2]));
     }
@@ -715,6 +719,11 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         const out = try c.eng.output(&.{ "logs", "--tail", tail, svc.container });
         return c.res.send(200, "text/plain; charset=utf-8", out.text);
     }
+    if (eql(what, "metrics") and method(c, "GET")) {
+        const range = std.fmt.parseInt(i64, c.req.param("range") orelse "3600", 10) catch return c.res.fail(400, "range is in seconds");
+        const series = try metrics.query(c.a, c.store, id, std.math.clamp(range, 300, 7 * 86400), nowS(), 240);
+        return c.res.json(200, .{ .interval = metrics.interval_s, .step = series.step, .from = series.from, .to = series.to, .points = series.points });
+    }
     if (eql(what, "http-logs") and method(c, "GET")) {
         const file = try std.fmt.allocPrint(c.a, "{s}/http/{s}.log", .{ c.store.root, id });
         const data = sys.readFileAlloc(c.a, file, 1 << 26) catch "";
@@ -722,6 +731,92 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         return c.res.send(200, "application/x-ndjson", lastLines(data, n));
     }
     c.res.fail(404, "not found");
+}
+
+const LogLine = struct { t: i64, service: []const u8, stream: []const u8, text: []const u8 };
+
+/// The latest output of every service of an environment, merged by time,
+/// keeping the lines that contain `q` (any case).
+fn environmentLogs(c: *Ctx, project: []const u8, env: []const u8) !void {
+    const tail = std.fmt.parseInt(u32, c.req.param("tail") orelse "300", 10) catch return c.res.fail(400, "bad tail");
+    const tail_text = try std.fmt.allocPrint(c.a, "{d}", .{@min(tail, 5000)});
+    const q = c.req.text("q") orelse "";
+    const only = c.req.text("service");
+    var out: std.ArrayList(LogLine) = .empty;
+    for (try c.store.listIn(project, env)) |svc| {
+        if (svc.container.len == 0) continue;
+        if (only) |o| if (o.len > 0 and !eql(o, svc.name)) continue;
+        const res = c.eng.output(&.{ "logs", "-t", "--tail", tail_text, svc.container }) catch continue;
+        var lines = std.mem.splitScalar(u8, res.text, '\n');
+        while (lines.next()) |line| {
+            const l = parseLogLine(line) orelse continue;
+            if (q.len > 0 and !containsIgnoreCase(l.text, q)) continue;
+            try out.append(c.a, .{ .t = l.t, .service = svc.name, .stream = l.stream, .text = l.text });
+        }
+    }
+    std.mem.sort(LogLine, out.items, {}, struct {
+        fn lessThan(_: void, x: LogLine, y: LogLine) bool {
+            return x.t < y.t;
+        }
+    }.lessThan);
+    const keep = @min(out.items.len, 2000);
+    c.res.json(200, out.items[out.items.len - keep ..]);
+}
+
+/// `2026-11-11T13:14:46.030Z stdout F text`, as `pdock logs -t` prints.
+fn parseLogLine(line: []const u8) ?struct { t: i64, stream: []const u8, text: []const u8 } {
+    var it = std.mem.splitScalar(u8, line, ' ');
+    const stamp = it.next() orelse return null;
+    const stream = it.next() orelse return null;
+    _ = it.next() orelse return null;
+    return .{ .t = parseStamp(stamp) orelse return null, .stream = stream, .text = it.rest() };
+}
+
+/// Milliseconds since 1970 from `YYYY-MM-DDTHH:MM:SS[.mmm]Z`.
+fn parseStamp(s: []const u8) ?i64 {
+    if (s.len < 20 or s[4] != '-' or s[10] != 'T' or s[s.len - 1] != 'Z') return null;
+    const num = struct {
+        fn f(x: []const u8) ?i64 {
+            return std.fmt.parseInt(i64, x, 10) catch null;
+        }
+    }.f;
+    const y = num(s[0..4]) orelse return null;
+    const mo = num(s[5..7]) orelse return null;
+    const d = num(s[8..10]) orelse return null;
+    const h = num(s[11..13]) orelse return null;
+    const mi = num(s[14..16]) orelse return null;
+    const sec = num(s[17..19]) orelse return null;
+    var ms: i64 = 0;
+    if (s.len >= 24 and s[19] == '.') ms = num(s[20..23]) orelse 0;
+    // Days from civil, after Howard Hinnant.
+    const yy = if (mo <= 2) y - 1 else y;
+    const era = @divFloor(yy, 400);
+    const yoe = yy - era * 400;
+    const mp = @mod(mo + 9, 12);
+    const doy = @divFloor(153 * mp + 2, 5) + d - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    return ((days * 24 + h) * 60 + mi) * 60_000 + sec * 1000 + ms;
+}
+
+fn containsIgnoreCase(hay: []const u8, needle: []const u8) bool {
+    if (needle.len > hay.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(hay[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+test "log lines" {
+    const l = parseLogLine("2026-11-11T13:14:46.030Z stdout F Ready to accept connections").?;
+    try std.testing.expectEqual(@as(i64, 1794402886030), l.t);
+    try std.testing.expectEqualStrings("stdout", l.stream);
+    try std.testing.expectEqualStrings("Ready to accept connections", l.text);
+    try std.testing.expectEqual(@as(?i64, 0), parseStamp("1970-01-01T00:00:00Z"));
+    try std.testing.expect(parseLogLine("garbage") == null);
+    try std.testing.expect(containsIgnoreCase("Hello World", "o w"));
+    try std.testing.expect(!containsIgnoreCase("Hello", "hello!"));
 }
 
 const Edge = struct { from: []const u8, to: []const u8 };

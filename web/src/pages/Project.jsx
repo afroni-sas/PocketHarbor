@@ -2,7 +2,7 @@
 // which holds the canvas and the service panel, or the project settings.
 
 import { computed, effect, untracked } from '@preact/signals'
-import { Check, ChevronsUpDown, Copy, LayoutGrid, Layers, Network, Plus, Rocket, Settings, Trash, User } from 'lucide-preact'
+import { Activity, Check, ChevronsUpDown, Copy, LayoutGrid, Layers, Network, Plus, Rocket, ScrollText, Settings, Trash, User } from 'lucide-preact'
 import { del, enc, post } from '../api.js'
 import { me, projects, toast } from '../state.js'
 import { follow, navigate, withQuery } from '../router.js'
@@ -12,6 +12,16 @@ import { Canvas, CanvasOverlay } from './Canvas.jsx'
 import { ServicePanel } from './ServicePanel.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { newProject } from './Dashboard.jsx'
+import { Observability } from './Metrics.jsx'
+import { ProjectLogs } from './ProjectLogs.jsx'
+
+/** The project's pages, as in Railway's top bar. */
+const pages = [
+  ['canvas', '', 'Architecture', Network],
+  ['observability', '/observability', 'Observability', Activity],
+  ['logs', '/logs', 'Logs', ScrollText],
+  ['settings', '/settings', 'Settings', Settings],
+]
 
 const envPath = (env, extra = '') => withQuery(`/project/${enc(page.peek().project)}${extra}`, { env: env === 'production' ? undefined : env })
 
@@ -72,7 +82,7 @@ function envMenu(anchor) {
   const envs = project.peek()?.environments || [p.env]
   openMenu(anchor, [
     'Environments',
-    ...envs.map((e) => [e, e === p.env ? Check : null, () => navigate(envPath(e, p.settings ? '/settings' : ''))]),
+    ...envs.map((e) => [e, e === p.env ? Check : null, () => navigate(envPath(e, p.view === 'canvas' ? '' : `/${p.view}`))]),
     null,
     ['New environment', Plus, newEnvironment],
     p.env !== 'production' && [`Delete ${p.env}`, Trash, () => removeEnvironment(p.env), true],
@@ -98,14 +108,12 @@ function Topbar({ p }) {
       </button>
       <span class="spacer" />
       <nav class="top-tabs">
-        <a href={projectPath()} onClick={follow} class={p.settings ? '' : 'active'} aria-label="Architecture">
-          <Network />
-          <span>Architecture</span>
-        </a>
-        <a href={projectPath('/settings')} onClick={follow} class={p.settings ? 'active' : ''} aria-label="Settings">
-          <Settings />
-          <span>Settings</span>
-        </a>
+        {pages.map(([view, path, label, Icon]) => (
+          <a key={view} href={projectPath(path)} onClick={follow} class={p.view === view ? 'active' : ''} aria-label={label}>
+            <Icon />
+            <span>{label}</span>
+          </a>
+        ))}
       </nav>
     </header>
   )
@@ -118,12 +126,11 @@ function Rail({ p }) {
       <a href="/" onClick={follow} title="All projects">
         <img class="logo" src="/icon.svg" alt="PocketHarbor" />
       </a>
-      <a href={projectPath()} onClick={follow} class={`rail-btn${p.settings ? '' : ' active'}`} title="Architecture" aria-label="Architecture">
-        <Network />
-      </a>
-      <a href={projectPath('/settings')} onClick={follow} class={`rail-btn${p.settings ? ' active' : ''}`} title="Project settings" aria-label="Project settings">
-        <Settings />
-      </a>
+      {pages.map(([view, path, label, Icon]) => (
+        <a key={view} href={projectPath(path)} onClick={follow} class={`rail-btn${p.view === view ? ' active' : ''}`} title={label} aria-label={label}>
+          <Icon />
+        </a>
+      ))}
       <span class="spacer" />
       <a href="/settings" onClick={follow} class="rail-btn" title="Workspace settings" aria-label="Workspace settings">
         <Layers />
@@ -279,8 +286,12 @@ export function ProjectPage() {
       <div class="project-main">
         <Topbar p={p} />
         <div class="stage">
-          {p.settings ? (
+          {p.view === 'settings' ? (
             <ProjectSettings p={p} />
+          ) : p.view === 'observability' ? (
+            <Observability />
+          ) : p.view === 'logs' ? (
+            <ProjectLogs />
           ) : (
             <>
               <Canvas />
