@@ -28,13 +28,21 @@ adb shell sh /data/local/tmp/ph/install.sh --from /data/local/tmp/ph
 
 A shell started by adb cannot start PocketHarbor at boot; Termux can.
 
+## Uninstall
+
+```bash
+gh release download ${GITHUB_REF_NAME} -R ${GITHUB_REPOSITORY} -p uninstall.sh && sh uninstall.sh
+```
+
+It stops PocketHarbor and its services and removes the programs, the start at boot and the lines the installer added to your shell. The data stays, and installing again brings the projects back, unless you choose to delete it (`--purge`; `--purge-engine` also deletes the images).
+
 ## Files
 
 | Device | File |
 |---|---|
 | Phones and tablets (64-bit ARM) | `pharbor-android-arm64-v8a` |
 | Emulators, x86 devices and Linux PCs | `pharbor-android-x86_64` |
-| Everything | `install.sh` |
+| Everything | `install.sh`, `uninstall.sh` |
 
 The binaries are static: they also run on any 64-bit Linux.
 

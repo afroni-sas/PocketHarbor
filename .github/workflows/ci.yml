@@ -61,3 +61,18 @@ jobs:
         run: |
           git add -N src/web src/web_assets.zig
           git diff --exit-code --stat -- src/web src/web_assets.zig
+
+  scripts:
+    name: Install scripts parse
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Phones run them with toybox or busybox sh: POSIX only.
+      - name: POSIX syntax
+        run: |
+          for f in install.sh uninstall.sh; do
+            dash -n "$f"
+            sh "$f" --help > /dev/null
+          done

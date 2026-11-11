@@ -12,6 +12,7 @@ on:
       - '.github/workflows/release.yml'
       - '.github/release-notes.md'
       - 'install.sh'
+      - 'uninstall.sh'
   workflow_dispatch:
 
 permissions:
@@ -79,8 +80,8 @@ jobs:
           for abi in arm64-v8a x86_64; do
             cp "zig-out/android/$abi/pharbor" "dist/pharbor-android-$abi"
           done
-          cp install.sh dist/
-          (cd dist && sha256sum pharbor-android-* install.sh > SHA256SUMS)
+          cp install.sh uninstall.sh dist/
+          (cd dist && sha256sum pharbor-android-* install.sh uninstall.sh > SHA256SUMS)
           cat dist/SHA256SUMS
 
       # The static binaries run on any Linux, so the runner installs the
@@ -100,7 +101,30 @@ jobs:
           # Run again, as an update: the account stays and the proxy restarts.
           PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --port 18080 --no-boot
           curl -fsS -H 'Content-Type: application/json' -d '{"email":"ci@example.test","password":"ci-password-1"}' http://127.0.0.1:18080/api/login > /dev/null
-          kill -TERM "$(cut -d' ' -f1 "$RUNNER_TEMP/data/proxy.pid")"
+          # A second installation cannot take a port that is in use.
+          if PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin2" --data "$RUNNER_TEMP/data2" --port 18080 --no-boot --no-start 2> busy.txt; then
+            echo "::error::The installer took port 18080, which is in use"
+            exit 1
+          fi
+          grep -q "already in use" busy.txt
+
+      - name: Try the uninstaller
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          # Keeping the data: nothing runs and the programs are gone.
+          sh uninstall.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data"
+          if curl -fsS -m 2 http://127.0.0.1:18080/api/status; then
+            echo "::error::PocketHarbor still answers after uninstall.sh"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bin/pharbor" && test ! -e "$RUNNER_TEMP/bin/pdock"
+          test -f "$RUNNER_TEMP/data/settings.json"
+          # Installing again brings the account back, on the same port.
+          PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --no-boot
+          curl -fsS -H 'Content-Type: application/json' -d '{"email":"ci@example.test","password":"ci-password-1"}' http://127.0.0.1:18080/api/login > /dev/null
+          # Purging leaves nothing.
+          sh uninstall.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --purge --purge-engine
+          test ! -e "$RUNNER_TEMP/data" && test ! -e "$HOME/.pocketdock"
 
       - name: Keep the files of this run
         if: github.ref_type != 'tag'
