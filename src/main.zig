@@ -21,6 +21,7 @@ const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
 const metrics = @import("metrics.zig");
+const alerts = @import("alerts.zig");
 const web_assets = @import("web_assets.zig");
 const Store = store_mod.Store;
 const Engine = engine.Engine;
@@ -173,6 +174,7 @@ pub fn main(init: std.process.Init) !void {
     // Android has no resolv.conf; builds download from GitHub.
     const io = dns.wrapIo(init.io, init.environ_map.get("POCKETDOCK_DNS"));
     var ctx: Ctx = .{ .a = a, .gpa = init.gpa, .store = store, .eng = eng, .envp = envp, .env = init.environ_map, .io = io };
+    alerts.setEmailApi(init.environ_map.get("PHARBOR_EMAIL_API") orelse "");
 
     const commands = .{
         .{ "serve", cmdServe },
@@ -346,7 +348,7 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     };
     const thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, scheduler.run, .{ c.store.root, c.envp });
     thread.detach();
-    const sampler = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, metrics.run, .{ c.store.root, c.eng.bin, c.envp });
+    const sampler = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, metrics.run, .{ c.store.root, c.eng.bin, c.envp, c.io, panel.key });
     sampler.detach();
     try httpd.serve(.{ .ip = .{ 127, 0, 0, 1 }, .port = s.panel_port }, api.handle, panel);
 }
@@ -487,16 +489,42 @@ fn cmdRun(c: *Ctx, args: []const [:0]const u8) !void {
 
 fn cmdCronRun(c: *Ctx, args: []const [:0]const u8) !void {
     if (args.len != 1) return;
-    _ = deploy.cronRun(c.store, c.eng, try varsFor(c), args[0]) catch {};
+    const vars = try varsFor(c);
+    const svc = c.store.load(args[0]) catch return;
+    const code = deploy.cronRun(c.store, c.eng, vars, args[0]) catch |e| {
+        // The run before is still going: nothing failed.
+        if (e == error.StillRunning) return;
+        return jobFailed(c, vars, svc, "cron_failed", "the cron run could not start", @errorName(e));
+    };
+    if (code != 0) {
+        const detail = try std.fmt.allocPrint(c.a, "It exited with code {d}. Its output is in the Cron Runs tab.", .{code});
+        jobFailed(c, vars, svc, "cron_failed", "the cron run failed", detail);
+    }
 }
 
 fn cmdBackupJob(c: *Ctx, args: []const [:0]const u8) !void {
     if (args.len != 1) return;
     const svc = c.store.load(args[0]) catch return;
     for (svc.volumes) |v| {
-        _ = backup.create(c.store, c.eng, svc, v.name, true) catch continue;
+        _ = backup.create(c.store, c.eng, svc, v.name, true) catch |e| {
+            const detail = try std.fmt.allocPrint(c.a, "The scheduled backup of {s} failed: {s}.", .{ v.name, @errorName(e) });
+            jobFailed(c, try varsFor(c), svc, "backup_failed", "a backup failed", detail);
+            continue;
+        };
         backup.prune(c.store, args[0], v.name, 7);
     }
+}
+
+fn jobFailed(c: *Ctx, vars: vars_mod.Vars, svc: store_mod.Service, kind: []const u8, what: []const u8, detail: []const u8) void {
+    alerts.notify(c.a, c.store, vars.key, c.io, .{
+        .kind = kind,
+        .title = std.fmt.allocPrint(c.a, "{s}: {s}", .{ svc.name, what }) catch what,
+        .detail = detail,
+        .project = svc.project,
+        .environment = svc.environment,
+        .service = svc.name,
+        .severity = .warning,
+    });
 }
 
 fn cmdVolume(c: *Ctx, args: []const [:0]const u8) !void {

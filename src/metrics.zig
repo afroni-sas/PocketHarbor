@@ -9,6 +9,8 @@ const std = @import("std");
 const sys = @import("sys.zig");
 const engine = @import("engine.zig");
 const backup = @import("backup.zig");
+const crypto = @import("crypto.zig");
+const alerts = @import("alerts.zig");
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
 const Allocator = std.mem.Allocator;
@@ -56,7 +58,55 @@ const Memory = struct {
     cpu: std.StringHashMapUnmanaged(Cpu) = .empty,
     offsets: std.StringHashMapUnmanaged(u64) = .empty,
     disk: std.StringHashMapUnmanaged(u64) = .empty,
+    /// Restart counts by container: one more means it crashed.
+    restarts: std.StringHashMapUnmanaged(u32) = .empty,
+    watch: std.StringHashMapUnmanaged(Watch) = .empty,
 };
+
+/// What the thresholds need between samples: the last five minutes of CPU,
+/// and which alerts are on so that each is sent once.
+pub const Watch = struct {
+    cpu: [window]f32 = @splat(0),
+    n: u8 = 0,
+    next: u8 = 0,
+    high_cpu: bool = false,
+    high_memory: bool = false,
+    high_disk: bool = false,
+
+    pub const window = 10;
+
+    pub fn add(w: *Watch, cpu: f32) void {
+        w.cpu[w.next] = cpu;
+        w.next = (w.next + 1) % window;
+        if (w.n < window) w.n += 1;
+    }
+
+    /// The average of the last five minutes, once there are five minutes.
+    pub fn average(w: Watch) ?f32 {
+        if (w.n < window) return null;
+        var sum: f32 = 0;
+        for (w.cpu) |v| sum += v;
+        return sum / window;
+    }
+};
+
+pub const Crossing = enum { none, up, down };
+
+/// Above the limit raises once; it lowers again under 80 % of it, so a
+/// value hovering around the limit does not send an alert every minute.
+pub fn cross(on: *bool, value: f64, limit: u32) Crossing {
+    if (limit == 0) {
+        on.* = false;
+        return .none;
+    }
+    const l: f64 = @floatFromInt(limit);
+    if (!on.* and value > l) {
+        on.* = true;
+        return .up;
+    }
+    if (on.* and value < l * 0.8) on.* = false;
+    return .none;
+}
 
 const Stat = struct { name: []const u8, pids: u32 = 0, memory: u64 = 0, cpu_ms: u64 = 0 };
 
@@ -64,19 +114,21 @@ fn nowS() i64 {
     return @intCast(@divFloor(sys.nowNs(), std.time.ns_per_s));
 }
 
+const Alerting = struct { io: std.Io, key: crypto.Key };
+
 /// Never returns.
-pub fn run(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
+pub fn run(root: []const u8, bin: [:0]const u8, envp: engine.Envp, io: std.Io, key: crypto.Key) void {
     var memory: Memory = .{ .arena = .init(std.heap.page_allocator) };
     var n: u64 = 0;
     while (true) : (n += 1) {
-        const next = tick(root, bin, envp, &memory, n % disk_every == 0);
+        const next = tick(root, bin, envp, .{ .io = io, .key = key }, &memory, n % disk_every == 0);
         memory.arena.deinit();
         memory = next;
         sys.sleepMs(interval_s * 1000);
     }
 }
 
-fn tick(root: []const u8, bin: [:0]const u8, envp: engine.Envp, before: *const Memory, measure_disk: bool) Memory {
+fn tick(root: []const u8, bin: [:0]const u8, envp: engine.Envp, alerting: Alerting, before: *const Memory, measure_disk: bool) Memory {
     var next: Memory = .{ .arena = .init(std.heap.page_allocator) };
     const keep = next.arena.allocator();
     var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -96,6 +148,8 @@ fn tick(root: []const u8, bin: [:0]const u8, envp: engine.Envp, before: *const M
 
     const services = store.list() catch return next;
     sys.mkdirP(store.path("metrics"), 0o700) catch return next;
+    const limits = alerts.load(store).thresholds;
+    var events: std.ArrayList(alerts.Event) = .empty;
     const now = nowS();
     const now_ns = sys.monoNs();
     for (services) |svc| {
@@ -130,7 +184,47 @@ fn tick(root: []const u8, bin: [:0]const u8, envp: engine.Envp, before: *const M
         next.disk.put(keep, key, disk.?) catch {};
 
         append(a, path(store, id), sample);
+
+        // Crashes: the supervisor restarted the container since last time.
+        if (svc.container.len > 0 and svc.cron.len == 0 and !svc.asleep) {
+            if (eng.inspect(svc.container)) |info| {
+                if (before.restarts.get(svc.container)) |prev| {
+                    if (info.restarts > prev) events.append(a, .{
+                        .kind = "crashed",
+                        .title = std.fmt.allocPrint(a, "{s} crashed", .{svc.name}) catch "A service crashed",
+                        .detail = std.fmt.allocPrint(a, "It exited with code {d} and was started again ({d} restart{s} so far).", .{ info.exit_code, info.restarts, if (info.restarts == 1) "" else "s" }) catch "",
+                        .project = svc.project,
+                        .environment = svc.environment,
+                        .service = svc.name,
+                    }) catch {};
+                }
+                const ckey = keep.dupe(u8, svc.container) catch continue;
+                next.restarts.put(keep, ckey, info.restarts) catch {};
+            }
+        }
+
+        var watch = before.watch.get(id) orelse Watch{};
+        if (svc.cron.len == 0) watch.add(sample.cpu);
+        const high = [_]struct { on: *bool, value: f64, limit: u32, unit: []const u8, kind: []const u8, what: []const u8, shown: []const u8 }{
+            .{ .on = &watch.high_cpu, .value = watch.average() orelse 0, .limit = limits.cpu_percent, .unit = "%", .kind = "high_cpu", .what = "CPU", .shown = std.fmt.allocPrint(a, "{d:.0}% on average over five minutes", .{watch.average() orelse 0}) catch "" },
+            .{ .on = &watch.high_memory, .value = @as(f64, @floatFromInt(sample.mem)) / (1 << 20), .limit = limits.memory_mb, .unit = " MB", .kind = "high_memory", .what = "memory", .shown = std.fmt.allocPrint(a, "{d} MB in use", .{sample.mem >> 20}) catch "" },
+            .{ .on = &watch.high_disk, .value = @as(f64, @floatFromInt(sample.disk)) / (1 << 20), .limit = limits.disk_mb, .unit = " MB", .kind = "high_disk", .what = "volume usage", .shown = std.fmt.allocPrint(a, "{d} MB in its volumes", .{sample.disk >> 20}) catch "" },
+        };
+        for (high) |h| {
+            if (cross(h.on, h.value, h.limit) != .up) continue;
+            events.append(a, .{
+                .kind = h.kind,
+                .title = std.fmt.allocPrint(a, "{s}: high {s}", .{ svc.name, h.what }) catch "High usage",
+                .detail = std.fmt.allocPrint(a, "{s}, above the limit of {d}{s}.", .{ h.shown, h.limit, h.unit }) catch "",
+                .project = svc.project,
+                .environment = svc.environment,
+                .service = svc.name,
+                .severity = .warning,
+            }) catch {};
+        }
+        next.watch.put(keep, key, watch) catch {};
     }
+    for (events.items) |ev| alerts.notify(a, store, alerting.key, alerting.io, ev);
     return next;
 }
 
@@ -362,4 +456,24 @@ test "the step is a whole number of intervals" {
 test "trimming keeps whole lines" {
     try t.expectEqualStrings("d\n", newestHalf("a\nb\nc\nd\n"));
     try t.expectEqualStrings("x", newestHalf("x"));
+}
+
+test "thresholds fire once and rearm below 80 %" {
+    var on = false;
+    try t.expectEqual(Crossing.none, cross(&on, 50, 80));
+    try t.expectEqual(Crossing.up, cross(&on, 90, 80));
+    try t.expectEqual(Crossing.none, cross(&on, 95, 80));
+    try t.expectEqual(Crossing.none, cross(&on, 70, 80));
+    try t.expectEqual(Crossing.none, cross(&on, 60, 80));
+    try t.expectEqual(Crossing.up, cross(&on, 85, 80));
+    try t.expectEqual(Crossing.none, cross(&on, 1000, 0));
+    try t.expect(!on);
+}
+
+test "the cpu average needs five minutes" {
+    var w: Watch = .{};
+    for (0..Watch.window - 1) |_| w.add(100);
+    try t.expect(w.average() == null);
+    w.add(0);
+    try t.expectApproxEqAbs(@as(f32, 90), w.average().?, 0.01);
 }
