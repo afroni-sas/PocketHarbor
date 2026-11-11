@@ -38,6 +38,7 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 | **Domains** | Custom hostnames per service, or `NAME.yourdomain` for all of them with `pharbor domain base`. |
 | **Idle sleep** | `--sleep-after 10m` stops a service nobody uses. The next request starts it and waits for it. |
 | **Metrics** | CPU, memory, volume size and HTTP traffic (requests, 5xx, response time, bytes) of every service, sampled every 30 seconds and kept for a week. |
+| **Templates** | PostgreSQL, MySQL, MariaDB, Redis, MongoDB 4.4, MinIO (S3) and NATS in one click, with a volume, a generated password and the variables other services reference, like `${{ postgres.DATABASE_URL }}`. |
 | **Alerts** | Discord, Slack, email (Resend) or signed webhooks for failed or finished deploys, crashes, failed cron runs and backups, and CPU, memory or volume thresholds. |
 | **Web terminal** | A shell in a running service's container, from the dashboard's Console tab. |
 | **Log search** | The output of every service of an environment, merged by time and searched on the phone. |

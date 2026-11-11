@@ -2,11 +2,11 @@
 // lets cards be dragged, with dashed arrows for variable references.
 
 import { signal } from '@preact/signals'
-import { Box, Grid3x3, HardDrive, Maximize, Plus, Square, ZoomIn, ZoomOut } from 'lucide-preact'
-import { enc, patch, post } from '../api.js'
-import { edges, services, toast } from '../state.js'
+import { Box, Database, Grid3x3, HardDrive, LayoutTemplate, Maximize, Package, Plus, Square, ZoomIn, ZoomOut } from 'lucide-preact'
+import { enc, get, patch, post } from '../api.js'
+import { closeOverlay, edges, overlay, services, toast } from '../state.js'
 import { closeService, openService, page, refresh } from '../project.js'
-import { GithubIcon, openForm, openMenu, ServiceIcon, Spinner, Status } from '../ui.jsx'
+import { attempt, GithubIcon, Modal, openForm, openMenu, ServiceIcon, Spinner, Status } from '../ui.jsx'
 
 const W = 260
 const H = 106
@@ -480,10 +480,59 @@ function addEmpty() {
   })
 }
 
+const templateList = signal(null)
+
+async function deployTemplate(t) {
+  closeOverlay()
+  const p = page.peek()
+  await attempt(async () => {
+    const svc = await post(`/templates/${enc(t.id)}`, { project: p.project, environment: p.env, ...nextSpot() })
+    await refresh()
+    openService(svc.name)
+  }, `Deploying ${t.name}`)
+}
+
+const titles = { database: 'Add a database', bucket: 'Add a bucket' }
+
+/** Databases, buckets, or every template. */
+async function chooseTemplate(category) {
+  if (!templateList.peek()) {
+    try {
+      templateList.value = await get('/templates')
+    } catch (err) {
+      return toast(err.message, 'error')
+    }
+  }
+  const list = templateList.peek().filter((t) => !category || t.category === category)
+  if (list.length === 1) return deployTemplate(list[0])
+  overlay.value = () => (
+    <Modal title={titles[category] || 'Deploy a template'} wide>
+      <div class="body">
+        <div class="templates">
+          {list.map((t) => (
+            <button key={t.id} class="template" onClick={() => deployTemplate(t)}>
+              <ServiceIcon svc={{ image: t.image }} size={22} />
+              <span>
+                <b>{t.name}</b>
+                <span class="muted small">{t.description}</span>
+                <span class="mono muted small">{t.image}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+        <p class="muted small" style="margin:0">Each comes with a volume, a generated password and variables to connect to it.</p>
+      </div>
+    </Modal>
+  )
+}
+
 export function addMenu(anchor) {
   openMenu(anchor, [
     'Add to this environment',
     ['GitHub Repo', GithubIcon, addRepo],
+    ['Database', Database, () => chooseTemplate('database')],
+    ['Bucket', Package, () => chooseTemplate('bucket')],
+    ['Template', LayoutTemplate, () => chooseTemplate(null)],
     ['Docker Image', Box, addImage],
     ['Empty Service', Square, addEmpty],
   ])

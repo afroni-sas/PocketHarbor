@@ -18,6 +18,7 @@ const metrics = @import("metrics.zig");
 const ws = @import("ws.zig");
 const terminal = @import("terminal.zig");
 const alerts = @import("alerts.zig");
+const templates = @import("templates.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -177,6 +178,7 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "registries")) return registries(c, seg[1..]);
     if (eql(seg[0], "tunnel")) return tunnelApi(c, seg[1..]);
     if (eql(seg[0], "alerts")) return alertsApi(c, seg[1..]);
+    if (eql(seg[0], "templates")) return templatesApi(c, seg[1..]);
     c.res.fail(404, "not found");
 }
 
@@ -1008,6 +1010,60 @@ fn tunnelApi(c: *Ctx, seg: []const []const u8) !void {
         return c.res.json(200, .{ .ok = true });
     }
     c.res.fail(404, "not found");
+}
+
+fn templatesApi(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 0 and method(c, "GET")) {
+        const View = struct { id: []const u8, name: []const u8, category: []const u8, description: []const u8, image: []const u8, port: u16, connect: []const u8 };
+        var out: std.ArrayList(View) = .empty;
+        for (templates.all) |tpl| try out.append(c.a, .{
+            .id = tpl.id,
+            .name = tpl.name,
+            .category = tpl.category,
+            .description = tpl.description,
+            .image = tpl.image,
+            .port = tpl.port,
+            .connect = tpl.connect,
+        });
+        return c.res.json(200, out.items);
+    }
+    if (seg.len != 1 or !method(c, "POST")) return c.res.fail(404, "not found");
+    const tpl = templates.find(seg[0]) orelse return c.res.fail(404, "no such template");
+    const body = c.req.json(struct {
+        project: []const u8 = store_mod.default_project,
+        environment: []const u8 = store_mod.default_environment,
+        name: ?[]const u8 = null,
+        x: i32 = 0,
+        y: i32 = 0,
+    }) catch return c.res.fail(400, "invalid request");
+    const base = body.name orelse tpl.id;
+    for ([_][]const u8{ base, body.project, body.environment }) |n| if (!validName(n)) return c.res.fail(400, "names use a-z, 0-9 and -");
+
+    var svc: Service = .{ .name = base, .project = body.project, .environment = body.environment };
+    {
+        const lock = try c.store.lock();
+        defer c.store.unlock(lock);
+        // postgres, postgres-2, postgres-3...
+        var n: u32 = 2;
+        while (c.store.exists(c.store.idOf(svc))) : (n += 1) {
+            if (body.name != null) return c.res.fail(409, "a service with this name exists");
+            svc.name = try std.fmt.allocPrint(c.a, "{s}-{d}", .{ base, n });
+        }
+        svc.image = tpl.image;
+        svc.port = tpl.port;
+        svc.start_command = tpl.start_command;
+        const volume = [_]store_mod.Volume{.{ .name = try std.fmt.allocPrint(c.a, "{s}-data", .{svc.name}), .mount = tpl.mount }};
+        svc.volumes = try c.a.dupe(store_mod.Volume, &volume);
+        svc.x = body.x;
+        svc.y = body.y;
+        try c.store.ensureEnvironment(svc.project, svc.environment);
+        try c.store.save(svc);
+        var secret: [24]u8 = undefined;
+        templates.password(&secret);
+        try c.vars.put(svc.project, svc.environment, svc.name, try templates.variables(c.a, tpl, &secret));
+    }
+    startDeploy(c, c.store.idOf(svc), "api");
+    c.res.json(201, try serviceView(c, svc));
 }
 
 const ChannelView = struct {
