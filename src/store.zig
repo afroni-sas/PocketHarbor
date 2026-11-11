@@ -50,6 +50,12 @@ pub const Service = struct {
     env: []const []const u8 = &.{},
     /// Empty: a deployment is healthy as soon as its port accepts connections.
     health_path: []const u8 = "",
+    /// How long a deployment has to become healthy; 0 is the default, 180 s.
+    health_timeout_s: u32 = 0,
+    /// What happens when the app exits, as Railway names it: "on-failure"
+    /// (restarted up to `restart_retries` times), "always" or "never".
+    restart_policy: []const u8 = "on-failure",
+    restart_retries: u32 = 10,
     sleep_after_s: u32 = 0,
     volumes: []const Volume = &.{},
     /// "daily", "weekly" or empty: when its volumes are backed up.

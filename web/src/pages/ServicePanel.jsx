@@ -769,6 +769,12 @@ const sections = [
   ['danger', 'Danger'],
 ]
 
+const restartHints = {
+  'on-failure': 'Started again when it crashes, up to the number of tries below; then it stays crashed.',
+  always: 'Started again whenever it stops, even after a clean exit.',
+  never: 'Left stopped when it exits, and after the phone restarts.',
+}
+
 function Settings({ svc }) {
   const b = backups.value
   const sizes = b.id === svc.id && b.volumes ? Object.fromEntries(b.volumes.map((v) => [v.name, v.size])) : {}
@@ -962,6 +968,14 @@ function Settings({ svc }) {
           <Group label="Healthcheck Path" hint="The new deployment gets the traffic once this path answers 2xx." keys="healthcheck health zero downtime">
             <Text svc={svc} field="health_path" placeholder="/health" />
           </Group>
+          <Group label="Healthcheck Timeout" hint="How long a new deployment has to answer before it is marked as failed." keys="healthcheck timeout">
+            <div class="row">
+              <div style="width:120px">
+                <Text svc={svc} field="health_timeout_s" placeholder="180" number />
+              </div>
+              <span class="muted small">seconds</span>
+            </div>
+          </Group>
           <Group label="Cron Schedule" hint="Runs the service on a schedule, to completion, instead of keeping it up." keys="cron schedule job">
             <Text svc={svc} field="cron" placeholder="*/15 * * * *" live />
           </Group>
@@ -980,9 +994,29 @@ function Settings({ svc }) {
               </div>
             )}
           </Group>
-          <Group label="Restart Policy" keys="restart policy">
-            <p class="muted small" style="margin:0">Always: a crashed service is started again.</p>
-          </Group>
+          {!svc.cron && (
+            <Group label="Restart Policy" hint="What happens when the app exits. Applies with the next deploy." keys="restart policy crash retries">
+              <select
+                class="select"
+                value={svc.restart_policy}
+                aria-label="Restart policy"
+                onChange={(e) => attempt(() => update(svc, { restart_policy: e.currentTarget.value }), 'Saved')}
+              >
+                <option value="on-failure">On Failure</option>
+                <option value="always">Always</option>
+                <option value="never">Never</option>
+              </select>
+              <p class="muted small" style="margin:8px 0 0">{restartHints[svc.restart_policy]}</p>
+              {svc.restart_policy === 'on-failure' && (
+                <div class="row" style="margin-top:10px">
+                  <span class="muted small">Number of times to try restarting</span>
+                  <div style="width:90px">
+                    <Text svc={svc} field="restart_retries" placeholder="10" number />
+                  </div>
+                </div>
+              )}
+            </Group>
+          )}
         </Section>
 
         <Section id="volumes" icon={HardDrive} title="Volumes" keys="volume storage disk backup">

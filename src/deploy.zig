@@ -38,6 +38,8 @@ pub const Options = struct {
     domains: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
     health_path: ?[]const u8 = null,
+    health_timeout_s: ?u32 = null,
+    restart_policy: ?[]const u8 = null,
     sleep_after_s: ?u32 = null,
 };
 
@@ -166,6 +168,12 @@ pub fn configure(store: Store, vars: vars_mod.Vars, name: []const u8, opts: Opti
     }
     if (opts.port) |p| svc.port = p;
     if (opts.health_path) |p| svc.health_path = p;
+    if (opts.health_timeout_s) |t| svc.health_timeout_s = t;
+    if (opts.restart_policy) |r| {
+        const policy = parseRestart(r) orelse return error.BadRestartPolicy;
+        svc.restart_policy = policy.name;
+        if (policy.retries) |n| svc.restart_retries = n;
+    }
     if (opts.sleep_after_s) |s| svc.sleep_after_s = s;
 
     var set: std.ArrayList(vars_mod.Var) = .empty;
@@ -217,8 +225,30 @@ pub const RunOptions = struct {
     /// With `from`: also run it with the variables it had, as a rollback.
     restore_env: bool = false,
     echo: bool = true,
-    timeout_s: u32 = default_timeout_s,
 };
+
+pub const RestartPolicy = struct { name: []const u8, retries: ?u32 = null };
+
+/// "on-failure", "on-failure:5", "always" or "never".
+pub fn parseRestart(text: []const u8) ?RestartPolicy {
+    const colon = std.mem.indexOfScalar(u8, text, ':');
+    const name = if (colon) |k| text[0..k] else text;
+    const retries = if (colon) |k| std.fmt.parseInt(u32, text[k + 1 ..], 10) catch return null else null;
+    for ([_][]const u8{ "on-failure", "always", "never" }) |known| {
+        if (std.mem.eql(u8, name, known)) {
+            if (retries != null and !std.mem.eql(u8, known, "on-failure")) return null;
+            return .{ .name = known, .retries = retries };
+        }
+    }
+    return null;
+}
+
+/// The policy as pdock run takes it.
+fn restartArg(a: Allocator, svc: Service) ![]const u8 {
+    if (std.mem.eql(u8, svc.restart_policy, "always")) return "always";
+    if (std.mem.eql(u8, svc.restart_policy, "never")) return "no";
+    return std.fmt.allocPrint(a, "on-failure:{d}", .{svc.restart_retries});
+}
 
 /// Ships the service's saved definition.
 pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts: RunOptions) !void {
@@ -329,7 +359,7 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
     }
 
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(a, &.{ "run", "-d", "--name", container, "--restart", "always", "--hostname", store.publicLabel(svc.*) });
+    try args.appendSlice(a, &.{ "run", "-d", "--name", container, "--restart", try restartArg(a, svc.*), "--hostname", store.publicLabel(svc.*) });
     var has_port = false;
     for (env) |v| has_port = has_port or std.mem.eql(u8, v.name, "PORT");
     if (!has_port) {
@@ -387,7 +417,8 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         return error.StartFailed;
     }
 
-    const deadline = sys.monoNs() + @as(i128, opts.timeout_s) * std.time.ns_per_s;
+    const timeout_s: u32 = if (svc.health_timeout_s > 0) svc.health_timeout_s else default_timeout_s;
+    const deadline = sys.monoNs() + @as(i128, timeout_s) * std.time.ns_per_s;
     errdefer {
         const output = eng.logs(container);
         const tail = lastLines(output, 20);
@@ -714,4 +745,22 @@ pub fn duplicateEnvironment(store: Store, vars: vars_mod.Vars, project: []const 
         count += 1;
     }
     return count;
+}
+
+test "restart policies as Railway names them" {
+    const t = std.testing;
+    try t.expectEqualStrings("on-failure", parseRestart("on-failure").?.name);
+    try t.expectEqual(@as(?u32, 5), parseRestart("on-failure:5").?.retries);
+    try t.expectEqualStrings("never", parseRestart("never").?.name);
+    try t.expectEqual(@as(?u32, null), parseRestart("always").?.retries);
+    try t.expect(parseRestart("always:3") == null);
+    try t.expect(parseRestart("on-failure:x") == null);
+    try t.expect(parseRestart("sometimes") == null);
+
+    var buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const a = fba.allocator();
+    try t.expectEqualStrings("on-failure:10", try restartArg(a, .{ .name = "x" }));
+    try t.expectEqualStrings("no", try restartArg(a, .{ .name = "x", .restart_policy = "never" }));
+    try t.expectEqualStrings("always", try restartArg(a, .{ .name = "x", .restart_policy = "always" }));
 }

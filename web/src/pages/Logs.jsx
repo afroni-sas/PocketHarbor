@@ -278,17 +278,24 @@ function Details({ svc }) {
         <div class="card card-pad">
           <b class="detail-card-title">Deploy</b>
           <Item label="Runs on" value="This phone" />
-          <Item label="Port" value={String(svc.port || 8080)} />
+          <Item label="Port" value={svc.port ? String(svc.port) : 'Detected'} />
           <Item label="Healthcheck path" value={svc.health_path} mono />
+          <Item label="Healthcheck timeout" value={`${svc.health_timeout_s || 180} s`} />
           {svc.start_command && <Item label="Start command" value={svc.start_command} mono />}
           {svc.pre_deploy && <Item label="Pre-deploy" value={svc.pre_deploy} mono />}
-          <Item label="Restart policy" value="Always" />
+          {!svc.cron && <Item label="Restart policy" value={restartLabel(svc)} />}
           {svc.sleep_after_s > 0 && <Item label="Sleeps after" value={`${svc.sleep_after_s} s idle`} />}
           <Item label="Container" value={d.container} mono />
         </div>
       </div>
     </div>
   )
+}
+
+function restartLabel(svc) {
+  if (svc.restart_policy === 'always') return 'Always'
+  if (svc.restart_policy === 'never') return 'Never'
+  return `On Failure, ${svc.restart_retries} tries`
 }
 
 function download(name, text) {
