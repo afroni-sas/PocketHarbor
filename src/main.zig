@@ -335,6 +335,24 @@ fn startPanel(c: *Ctx) void {
     }
 }
 
+/// The panel's port on the loopback. When another program already has it,
+/// any free port will do: the proxy learns it from routes.json. Otherwise
+/// the proxy would hand the dashboard's requests, cookies included, to that
+/// other program.
+fn panelListener(c: *Ctx, wanted: u16) !i32 {
+    if (net.listenTcp(.{ .ip = .{ 127, 0, 0, 1 }, .port = wanted })) |fd| return fd else |_| {}
+    const fd = try net.listenTcp(.{ .ip = .{ 127, 0, 0, 1 }, .port = 0 });
+    const port = try net.localPort(fd);
+    sys.eprint("panel: port {d} is taken, using {d}\n", .{ wanted, port });
+    const lock = try c.store.lock();
+    defer c.store.unlock(lock);
+    var s = c.store.settings();
+    s.panel_port = port;
+    try c.store.saveSettings(s);
+    c.store.syncRoutes();
+    return fd;
+}
+
 fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     const s = c.store.settings();
     const panel = try c.a.create(api.Panel);
@@ -350,7 +368,7 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     thread.detach();
     const sampler = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, metrics.run, .{ c.store.root, c.eng.bin, c.envp, c.io, panel.key });
     sampler.detach();
-    try httpd.serve(.{ .ip = .{ 127, 0, 0, 1 }, .port = s.panel_port }, api.handle, panel);
+    try httpd.serveOn(try panelListener(c, s.panel_port), api.handle, panel);
 }
 
 /// `_deploy ID TRIGGER [N]`: run in the background for the panel.
