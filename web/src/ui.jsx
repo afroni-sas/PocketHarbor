@@ -244,17 +244,35 @@ export function confirm({ title, body, action = 'Confirm', danger = true, onConf
 /** A menu under `anchor`, each item [label, icon, onClick, danger]. */
 export function openMenu(anchor, items) {
   const r = anchor.getBoundingClientRect()
-  const left = Math.min(r.left, innerWidth - 230)
-  const top = r.bottom + 4
+  openMenuAt(r.left, r.bottom + 4, items, r.top - 4)
+}
+
+/** Keeps a menu inside the window: above `flip` or moved up when it would overflow. */
+function fitMenu(el, flip) {
+  const r = el.getBoundingClientRect()
+  if (r.right > innerWidth - 8) el.style.left = `${Math.max(8, innerWidth - r.width - 8)}px`
+  if (r.bottom > innerHeight - 8) {
+    const top = flip !== undefined && flip - r.height >= 8 ? flip - r.height : innerHeight - r.height - 8
+    el.style.top = `${Math.max(8, top)}px`
+  }
+}
+
+/** A menu at a point, as a right click opens it. */
+export function openMenuAt(left, top, items, flip) {
+  const dismiss = (e) => {
+    if (e.target !== e.currentTarget) return
+    e.preventDefault()
+    closeOverlay()
+  }
   overlay.value = () => (
-    <div style="position:fixed;inset:0;z-index:55" onMouseDown={(e) => e.target === e.currentTarget && closeOverlay()}>
-      <div class="menu" style={`left:${left}px;top:${top}px`}>
+    <div style="position:fixed;inset:0;z-index:55" onMouseDown={dismiss} onContextMenu={dismiss}>
+      <div class="menu" role="menu" style={`left:${left}px;top:${top}px`} ref={(el) => el && fitMenu(el, flip)}>
         {items.map((item, i) => {
           if (!item) return <div key={i} class="divider" />
           if (typeof item === 'string') return <div key={i} class="menu-label">{item}</div>
           const [label, Icon, onClick, danger] = item
           return (
-            <div key={i} class={`menu-item${danger ? ' danger' : ''}`} onClick={() => { closeOverlay(); onClick() }}>
+            <div key={i} role="menuitem" class={`menu-item${danger ? ' danger' : ''}`} onClick={() => { closeOverlay(); onClick() }}>
               {Icon && <Icon />}
               {label}
             </div>
@@ -292,6 +310,14 @@ new MutationObserver((records) => {
     }
   }
 }).observe(document.body, { childList: true, subtree: true })
+
+// Escape closes the menu or dialog on top, and only it: the panel under it
+// sees the key as handled. A dialog that handles Escape itself prevents it.
+addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.defaultPrevented || !overlay.peek()) return
+  e.preventDefault()
+  closeOverlay()
+})
 
 export function Overlays() {
   const Current = overlay.value

@@ -2,11 +2,13 @@
 // lets cards be dragged, with dashed arrows for variable references.
 
 import { effect, signal } from '@preact/signals'
-import { Box, Database, Grid3x3, HardDrive, LayoutTemplate, Maximize, Package, Plus, Redo2, Square, Undo2, ZoomIn, ZoomOut } from 'lucide-preact'
+import { Braces, ChartLine, Copy, Grid3x3, HardDrive, Link, Maximize, Plus, Redo2, Rocket, Settings, SquareTerminal, Trash, Undo2, ZoomIn, ZoomOut } from 'lucide-preact'
 import { enc, get, patch, post } from '../api.js'
-import { closeOverlay, edges, overlay, services, toast } from '../state.js'
-import { closeService, openService, page, refresh } from '../project.js'
-import { attempt, GithubIcon, Modal, openForm, openMenu, ServiceIcon, Spinner, Status } from '../ui.jsx'
+import { edges, services, toast } from '../state.js'
+import { closeService, openService, page, privateName, refresh } from '../project.js'
+import { attempt, copy, openMenuAt, ServiceIcon, Spinner, Status } from '../ui.jsx'
+import { openAdd } from './AddDialog.jsx'
+import { removeService } from './ServicePanel.jsx'
 
 // Railway's card: 288 by 144, and 48 more for each volume.
 const W = 288
@@ -274,6 +276,7 @@ function Card({ node, selected, dragging }) {
       onPointerMove={cardMove}
       onPointerUp={cardUp}
       onPointerCancel={cardUp}
+      onContextMenu={(e) => cardMenu(e, svc)}
     >
       <div class="body">
         <div class="name">
@@ -443,7 +446,7 @@ export function CanvasOverlay() {
           <div class="card card-pad" style="width:min(360px,90%)">
             <b style="display:block;margin-bottom:6px">This environment is empty</b>
             <p class="muted small" style="margin:0 0 14px">Deploy a GitHub repository or a Docker image.</p>
-            <button class="btn primary" onClick={(e) => addMenu(e.currentTarget)}>
+            <button class="btn primary" onClick={() => openAdd()}>
               <Plus /> Add a service
             </button>
           </div>
@@ -476,7 +479,7 @@ export function CanvasOverlay() {
         </div>
       </div>
       <div class="stage-actions">
-        <button class="btn add" onClick={(e) => addMenu(e.currentTarget)}>
+        <button class="btn add" onClick={() => openAdd()}>
           <Plus /> Add
         </button>
       </div>
@@ -505,140 +508,54 @@ export async function createService(body) {
   return svc
 }
 
-const portOf = (text) => (text ? Number(text) : undefined)
-
-export function addRepo() {
-  openForm({
-    title: 'Deploy a GitHub repository',
-    submit: 'Deploy',
-    render: () => (
-      <>
-        <div class="field">
-          <label for="repo">Repository</label>
-          <input class="input mono" id="repo" name="repo" placeholder="owner/name or https://github.com/owner/name" required autofocus />
-          <span class="hint">Private repositories need a GitHub token in Settings.</span>
-        </div>
-        <div class="row" style="gap:12px;align-items:flex-start">
-          <div class="field" style="flex:1">
-            <label for="branch">Branch</label>
-            <input class="input mono" id="branch" name="branch" defaultValue="main" required />
-          </div>
-          <div class="field" style="flex:1">
-            <label for="root_dir">Root directory</label>
-            <input class="input mono" id="root_dir" name="root_dir" placeholder="/" />
-          </div>
-        </div>
-        <div class="field">
-          <label for="port">Port</label>
-          <input class="input mono" id="port" name="port" type="number" min="1" max="65535" placeholder="8080" />
-          <span class="hint">Where the app listens. It gets PORT set to this.</span>
-        </div>
-      </>
-    ),
-    onSubmit: async (f) => {
-      const repo = f.repo.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, '')
-      const name = uniqueName(repo.split('/').pop())
-      await createService({ name, repo, branch: f.branch.trim(), root_dir: f.root_dir.trim().replace(/^\/+/, ''), port: portOf(f.port), deploy: true })
-    },
-  })
-}
-
-export function addImage() {
-  openForm({
-    title: 'Deploy a Docker image',
-    submit: 'Deploy',
-    render: () => (
-      <>
-        <div class="field">
-          <label for="image">Image</label>
-          <input class="input mono" id="image" name="image" placeholder="nginx:alpine, ghcr.io/owner/app:latest" required autofocus />
-        </div>
-        <div class="field">
-          <label for="port">Port</label>
-          <input class="input mono" id="port" name="port" type="number" min="1" max="65535" placeholder="8080" />
-          <span class="hint">Where the image listens, if it serves HTTP.</span>
-        </div>
-      </>
-    ),
-    onSubmit: async (f) => {
-      const image = f.image.trim()
-      const base = image.split('@')[0].split('/').pop().split(':')[0]
-      await createService({ name: uniqueName(base), image, port: portOf(f.port), deploy: true })
-    },
-  })
-}
-
-export function addEmpty() {
-  openForm({
-    title: 'Empty service',
-    submit: 'Create',
-    render: () => (
-      <div class="field">
-        <label for="name">Name</label>
-        <input class="input" id="name" name="name" defaultValue={uniqueName('service')} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" required autofocus />
-        <span class="hint">Connect a repository or an image in its settings.</span>
-      </div>
-    ),
-    onSubmit: async ({ name }) => {
-      await createService({ name, deploy: false })
-    },
-  })
-}
-
-const templateList = signal(null)
-
-async function deployTemplate(t) {
-  closeOverlay()
-  const p = page.peek()
+/** A copy of a service's settings and variables, left for the user to deploy. */
+async function duplicate(svc) {
   await attempt(async () => {
-    const svc = await post(`/templates/${enc(t.id)}`, { project: p.project, environment: p.env, ...nextSpot() })
-    await refresh()
-    openService(svc.name)
-  }, `Deploying ${t.name}`)
+    const list = await get(`/services/${enc(svc.id)}/variables`)
+    const copyOf = await createService({
+      name: uniqueName(svc.name),
+      image: svc.image,
+      repo: svc.repo,
+      branch: svc.branch,
+      root_dir: svc.root_dir,
+      auto_deploy: svc.auto_deploy,
+      build_command: svc.build_command,
+      start_command: svc.start_command,
+      pre_deploy: svc.pre_deploy,
+      port: svc.port,
+      health_path: svc.health_path,
+      sleep_after_s: svc.sleep_after_s,
+      cron: svc.cron,
+      backup_schedule: svc.backup_schedule,
+      volumes: svc.volumes.map((v) => ({ name: v.name, mount: v.mount })),
+      env: list.map((v) => `${v.name}=${v.value}`),
+      deploy: false,
+    })
+    toast(`Duplicated as ${copyOf.name}; deploy it to start it`, 'success')
+  })
 }
 
-const titles = { database: 'Add a database', bucket: 'Add a bucket' }
-
-/** Databases, buckets, or every template. */
-export async function chooseTemplate(category) {
-  if (!templateList.peek()) {
-    try {
-      templateList.value = await get('/templates')
-    } catch (err) {
-      return toast(err.message, 'error')
-    }
-  }
-  const list = templateList.peek().filter((t) => !category || t.category === category)
-  if (list.length === 1) return deployTemplate(list[0])
-  overlay.value = () => (
-    <Modal title={titles[category] || 'Deploy a template'} wide>
-      <div class="body">
-        <div class="templates">
-          {list.map((t) => (
-            <button key={t.id} class="template" onClick={() => deployTemplate(t)}>
-              <ServiceIcon svc={{ image: t.image }} size={22} />
-              <span>
-                <b>{t.name}</b>
-                <span class="muted small">{t.description}</span>
-                <span class="mono muted small">{t.image}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-        <p class="muted small" style="margin:0">Each comes with a volume, a generated password and variables to connect to it.</p>
-      </div>
-    </Modal>
+/** Railway's right click on a card. */
+function cardMenu(e, svc) {
+  e.preventDefault()
+  e.stopPropagation()
+  cardGesture = null
+  const go = (query) => openService(svc.name, query)
+  const latest = svc.latest
+  const items = []
+  if (latest) items.push(['Latest deploy', Rocket, () => go({ logs: latest.number, logtab: latest.status === 'active' ? 'deploy' : undefined })])
+  items.push(
+    ['View Variables', Braces, () => go({ tab: 'variables' })],
+    ['View Metrics', ChartLine, () => go({ tab: 'metrics' })],
+    ['View Settings', Settings, () => go({ tab: 'settings' })],
   )
-}
-
-export function addMenu(anchor) {
-  openMenu(anchor, [
-    'Add to this environment',
-    ['GitHub Repo', GithubIcon, addRepo],
-    ['Database', Database, () => chooseTemplate('database')],
-    ['Bucket', Package, () => chooseTemplate('bucket')],
-    ['Template', LayoutTemplate, () => chooseTemplate(null)],
-    ['Docker Image', Box, addImage],
-    ['Empty Service', Square, addEmpty],
-  ])
+  if (!svc.cron) items.push(['Open Console', SquareTerminal, () => go({ tab: 'console' })])
+  items.push(
+    null,
+    ['Copy private address', Link, () => copy(privateName(svc))],
+    ['Duplicate', Copy, () => duplicate(svc)],
+    null,
+    ['Delete Service', Trash, () => removeService(svc), true],
+  )
+  openMenuAt(e.clientX, e.clientY, items)
 }

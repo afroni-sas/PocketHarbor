@@ -4,8 +4,8 @@ const Asset = @import("api.zig").Asset;
 pub const files = [_]Asset{
     .{ .path = "/apple-touch-icon.png", .type = "image/png", .body = @embedFile("web/apple-touch-icon.png") },
     .{ .path = "/assets/addon-fit-DIOBYJe3.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/addon-fit-DIOBYJe3.js") },
-    .{ .path = "/assets/index-Cq3S_-iD.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-Cq3S_-iD.js") },
-    .{ .path = "/assets/index-Cud4Kfg3.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-Cud4Kfg3.css") },
+    .{ .path = "/assets/index-BccrRnNV.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-BccrRnNV.js") },
+    .{ .path = "/assets/index-SpHrwz2d.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-SpHrwz2d.css") },
     .{ .path = "/assets/inter-latin-wght-normal-Dx4kXJAl.woff2", .type = "font/woff2", .body = @embedFile("web/assets/inter-latin-wght-normal-Dx4kXJAl.woff2") },
     .{ .path = "/assets/xterm-C8z0-R2m.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/xterm-C8z0-R2m.js") },
     .{ .path = "/assets/xterm-sLQPUA_C.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/xterm-sLQPUA_C.css") },

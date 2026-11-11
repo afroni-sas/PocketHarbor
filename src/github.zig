@@ -9,6 +9,14 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
 pub const Commit = struct { sha: []const u8, message: []const u8 };
 
+pub const Repo = struct {
+    full_name: []const u8,
+    private: bool = false,
+    default_branch: []const u8 = "main",
+    description: ?[]const u8 = null,
+    pushed_at: ?[]const u8 = null,
+};
+
 /// "owner/name", from that or from a github.com URL.
 pub fn normalizeRepo(input: []const u8) ?[]const u8 {
     var s = std.mem.trim(u8, input, " /");
@@ -69,6 +77,13 @@ pub const Client = struct {
         if (status == .unauthorized or status == .forbidden) return error.GitHubDenied;
         if (status != .ok) return error.GitHubError;
         return body.items;
+    }
+
+    /// The repositories the token can read, most recently pushed first.
+    pub fn repos(self: Client, a: Allocator) ![]Repo {
+        const url = try std.fmt.allocPrint(a, "{s}/user/repos?per_page=100&sort=pushed", .{self.api});
+        const body = try self.get(a, url, "application/vnd.github+json", null);
+        return std.json.parseFromSliceLeaky([]Repo, a, body, .{ .ignore_unknown_fields = true });
     }
 
     pub fn latestCommit(self: Client, a: Allocator, repo: []const u8, branch: []const u8) !Commit {

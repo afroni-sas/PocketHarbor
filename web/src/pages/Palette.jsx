@@ -8,9 +8,10 @@ import {
   CornerDownLeft,
   Database,
   FolderOpen,
+  HardDrive,
   Layers,
   LayoutGrid,
-  Package,
+  LayoutTemplate,
   Play,
   Plus,
   RotateCcw,
@@ -26,7 +27,7 @@ import { closeOverlay, me, overlay, projects, services, toast } from '../state.j
 import { navigate, withQuery } from '../router.js'
 import { openService, page, projectPath, refresh, setQuery } from '../project.js'
 import { GithubIcon, ServiceIcon } from '../ui.jsx'
-import { addEmpty, addImage, addRepo, chooseTemplate } from './Canvas.jsx'
+import { openAdd } from './AddDialog.jsx'
 import { newProject } from './Dashboard.jsx'
 
 const query = signal('')
@@ -50,11 +51,12 @@ function commands() {
   }
   if (p) {
     out.push(
-      { group: 'Add', label: 'Add a GitHub repository', icon: GithubIcon, run: addRepo },
-      { group: 'Add', label: 'Add a database', icon: Database, run: () => chooseTemplate('database') },
-      { group: 'Add', label: 'Add a bucket (MinIO)', icon: Package, run: () => chooseTemplate('bucket') },
-      { group: 'Add', label: 'Add a Docker image', icon: Box, run: addImage },
-      { group: 'Add', label: 'Add an empty service', icon: Plus, run: addEmpty },
+      { group: 'Add', label: 'New service', icon: Plus, run: () => openAdd() },
+      { group: 'Add', label: 'Add a GitHub repository', icon: GithubIcon, run: () => openAdd('repo') },
+      { group: 'Add', label: 'Add a database', icon: Database, run: () => openAdd('database') },
+      { group: 'Add', label: 'Add a template', icon: LayoutTemplate, run: () => openAdd('template') },
+      { group: 'Add', label: 'Add a Docker image', icon: Box, run: () => openAdd('image') },
+      { group: 'Add', label: 'Add a volume', icon: HardDrive, run: () => openAdd('volume') },
     )
     for (const svc of svcs) {
       out.push({ group: 'Services', label: svc.name, hint: svc.image || svc.repo, svc, run: () => (navigate(projectPath()), openService(svc.name)) })
