@@ -440,6 +440,14 @@ pre.card { padding: 14px; }
 .suffix .input { padding-right: 40px; }
 .suffix span { position: absolute; right: 10px; top: 9px; color: var(--muted); font-size: 12.5px; }
 
+
+/* Templates */
+.templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.template { display: flex; gap: 12px; align-items: flex-start; text-align: left; padding: 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg); cursor: pointer; }
+.template:hover { border-color: hsl(270, 45%, 45%); background: var(--gray-50); }
+.template > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.template svg { flex: none; margin-top: 1px; }
+
 /* Phones */
 @media (max-width: 760px) {
   .sidebar { display: none; }

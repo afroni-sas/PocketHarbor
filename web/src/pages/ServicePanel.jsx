@@ -19,6 +19,7 @@ import {
   HardDrive,
   Network,
   Play,
+  Plug,
   Plus,
   RefreshCw,
   Rocket,
@@ -127,6 +128,82 @@ export async function update(svc, body, live = false) {
   await patch(svcPath(svc), body)
   if (!live) markDirty(svc)
   await refresh()
+}
+
+/** The variable other services use to reach a database made from a template. */
+const connectVariable = [
+  [/postgres/, 'DATABASE_URL'],
+  [/mariadb/, 'MARIADB_URL'],
+  [/mysql/, 'MYSQL_URL'],
+  [/redis/, 'REDIS_URL'],
+  [/mongo/, 'MONGO_URL'],
+  [/minio/, 'S3_ENDPOINT'],
+  [/nats/, 'NATS_URL'],
+]
+
+export function connectVar(svc) {
+  const image = (svc.image || '').toLowerCase()
+  for (const [re, name] of connectVariable) if (re.test(image)) return name
+  return null
+}
+
+async function showConnect(svc) {
+  const name = connectVar(svc)
+  let resolved = []
+  try {
+    resolved = (await get(svcPath(svc, '/variables?resolved=1'))).variables
+  } catch (err) {
+    return toast(err.message, 'error')
+  }
+  const value = (resolved.find((v) => v.name === name) || {}).value || ''
+  const reference = `\${{ ${svc.name}.${name} }}`
+  const others = resolved.filter((v) => /URL|HOST|PORT|USER|ENDPOINT/.test(v.name) && v.name !== name && !v.name.startsWith('PHARBOR_'))
+  openForm({
+    title: `Connect to ${svc.name}`,
+    submit: 'Done',
+    wide: true,
+    render: () => (
+      <>
+        <div class="field">
+          <label>From another service of this environment</label>
+          <div class="code-box">
+            {reference}
+            <span class="spacer" />
+            <button type="button" class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(reference)}>
+              <Copy />
+            </button>
+          </div>
+          <span class="hint">Set it as a variable of that service, e.g. {name}={reference}; the canvas draws the arrow.</span>
+        </div>
+        <div class="field">
+          <label>{name}</label>
+          <div class="code-box">
+            <span style="overflow:hidden;text-overflow:ellipsis">{value}</span>
+            <span class="spacer" />
+            <button type="button" class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(value)}>
+              <Copy />
+            </button>
+          </div>
+          <span class="hint">Reachable on the phone's private network only, unless you give the service a domain or a tunnel.</span>
+        </div>
+        {others.length > 0 && (
+          <div class="field">
+            <label>Other variables</label>
+            {others.map((v) => (
+              <div class="var-row" key={v.name}>
+                <span class="name">{v.name}</span>
+                <span class="val">{v.value}</span>
+                <button type="button" class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(v.value)}>
+                  <Copy />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </>
+    ),
+    onSubmit: async () => {},
+  })
 }
 
 async function deployNow(svc) {
@@ -260,6 +337,11 @@ function Deployments({ svc }) {
       <div class="row" style="margin-bottom:14px;align-items:flex-start">
         <Hosts svc={svc} />
         <span class="spacer" />
+        {connectVar(svc) && (
+          <button class="btn sm" onClick={() => showConnect(svc)}>
+            <Plug /> Connect
+          </button>
+        )}
         <button class="btn sm primary" onClick={() => deployNow(svc)}>
           <Rocket /> Deploy
         </button>
