@@ -38,6 +38,23 @@ pub fn localPort(fd: i32) !u16 {
     return std.mem.bigToNative(u16, sa.port);
 }
 
+/// The address this device uses on its network, the one a LAN DNS record
+/// points at. A UDP socket is "connected" to pick a route: nothing is sent.
+pub fn lanAddress() ?[4]u8 {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return null;
+    const fd: i32 = @intCast(rc);
+    defer sys.close(fd);
+    var to: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, 53), .addr = @bitCast([4]u8{ 1, 1, 1, 1 }) };
+    if (linux.errno(linux.connect(fd, @ptrCast(&to), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return null;
+    var sa: linux.sockaddr.in = undefined;
+    var len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    if (linux.errno(linux.getsockname(fd, @ptrCast(&sa), &len)) != .SUCCESS) return null;
+    const ip: [4]u8 = @bitCast(sa.addr);
+    if (ip[0] == 0 or ip[0] == 127) return null;
+    return ip;
+}
+
 pub fn loopback(port: u16) linux.sockaddr.in {
     return .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
 }

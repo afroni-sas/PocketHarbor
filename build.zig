@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(addExe(b, target, optimize, false));
 
     const test_step = b.step("test", "Run unit tests");
-    for ([_][]const u8{ "src/http.zig", "src/routes.zig", "src/store.zig", "src/crypto.zig", "src/vars.zig", "src/detect.zig", "src/github.zig", "src/backup.zig", "src/cron.zig", "src/proxy.zig", "src/tunnel.zig", "src/metrics.zig", "src/httpd.zig", "src/api.zig", "src/ws.zig", "src/terminal.zig", "src/alerts.zig", "src/templates.zig", "src/dbview.zig", "src/deploy.zig" }) |file| {
+    for ([_][]const u8{ "src/http.zig", "src/routes.zig", "src/store.zig", "src/crypto.zig", "src/vars.zig", "src/detect.zig", "src/github.zig", "src/backup.zig", "src/cron.zig", "src/proxy.zig", "src/tunnel.zig", "src/metrics.zig", "src/httpd.zig", "src/api.zig", "src/ws.zig", "src/terminal.zig", "src/alerts.zig", "src/templates.zig", "src/dbview.zig", "src/deploy.zig", "src/domains.zig", "src/cloudflare.zig", "src/edge.zig" }) |file| {
         const tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(file),
             .target = target,
