@@ -6,17 +6,19 @@ import { enc, get, post } from './api.js'
 import { edges, me, projects, services, toast } from './state.js'
 import { match, navigate, route, withQuery } from './router.js'
 
+/** The pages of a project besides its canvas. */
+const views = ['settings', 'observability', 'logs']
+
 export const page = computed(() => {
   const r = route.value
-  const m =
-    match('/project/:project', r.path) ||
-    match('/project/:project/service/:service', r.path) ||
-    match('/project/:project/settings', r.path)
-  if (!m) return null
+  const m = match('/project/:project', r.path) || match('/project/:project/service/:service', r.path) || match('/project/:project/:view', r.path)
+  if (!m || (m.view && !views.includes(m.view))) return null
+  const view = m.view || 'canvas'
   return {
     project: m.project,
     service: m.service || null,
-    settings: !m.service && r.path.endsWith('/settings'),
+    view,
+    settings: view === 'settings',
     env: r.query.env || 'production',
     tab: r.query.tab || '',
     logs: r.query.logs || '',

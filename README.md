@@ -37,6 +37,8 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 | **Public access** | Cloudflare Tunnel: works behind a carrier's NAT, with HTTPS and no open port. |
 | **Domains** | Custom hostnames per service, or `NAME.yourdomain` for all of them with `pharbor domain base`. |
 | **Idle sleep** | `--sleep-after 10m` stops a service nobody uses. The next request starts it and waits for it. |
+| **Metrics** | CPU, memory, volume size and HTTP traffic (requests, 5xx, response time, bytes) of every service, sampled every 30 seconds and kept for a week. |
+| **Log search** | The output of every service of an environment, merged by time and searched on the phone. |
 | **HTTP logs** | One JSON line per request: method, host, path, status, duration, bytes and the real client address. Query strings are left out, since they often hold tokens. |
 
 ## Deploying
