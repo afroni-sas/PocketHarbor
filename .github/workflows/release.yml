@@ -98,14 +98,17 @@ jobs:
           mkdir -p "$HOME"
           PHARBOR_RELEASE_URL="file://$PWD/dist" PHARBOR_PASSWORD=ci-password-1 \
             sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --port 18080 \
-            --email ci@example.test --domain apps.example.test --no-boot
+            --email ci@example.test --domain apps.example.test --no-boot --local-only
           curl -fsS http://127.0.0.1:18080/api/status | tee status.json
           grep -q '"setup_needed":false' status.json
           curl -fsS -H 'Content-Type: application/json' -d '{"email":"ci@example.test","password":"ci-password-1"}' http://127.0.0.1:18080/api/login > /dev/null
           "$RUNNER_TEMP/bin/pharbor" version | grep -F "pharbor $VERSION"
-          # Run again, as an update: the account stays and the proxy restarts.
-          PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --port 18080 --no-boot
+          # Run again, as an update, with no options: the account, the port and
+          # the address stay (it listened on 127.0.0.1 only), and the proxy restarts.
+          PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin" --data "$RUNNER_TEMP/data" --no-boot
           curl -fsS -H 'Content-Type: application/json' -d '{"email":"ci@example.test","password":"ci-password-1"}' http://127.0.0.1:18080/api/login > /dev/null
+          tr '\0' ' ' < "/proc/$(cut -d' ' -f1 "$RUNNER_TEMP/data/proxy.pid")/cmdline" | tee listen.txt
+          grep -q -- '--listen 127.0.0.1:18080' listen.txt
           # A second installation cannot take a port that is in use.
           if PHARBOR_RELEASE_URL="file://$PWD/dist" sh install.sh --yes --dir "$RUNNER_TEMP/bin2" --data "$RUNNER_TEMP/data2" --port 18080 --no-boot --no-start 2> busy.txt; then
             echo "::error::The installer took port 18080, which is in use"

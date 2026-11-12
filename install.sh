@@ -298,6 +298,33 @@ proxy_pid() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "$pid"
 }
 
+# Where an earlier install listens, ADDRESS:PORT: from its running proxy,
+# else from what starts it at boot.
+current_listen() {
+    if pid=$(proxy_pid) && [ -r "/proc/$pid/cmdline" ]; then
+        tr '\0' ' ' <"/proc/$pid/cmdline" | sed -n 's/.*--listen \([^ ]*\).*/\1/p'
+        return
+    fi
+    for f in "$HOME/.config/systemd/user/pocketharbor.service" /etc/systemd/system/pocketharbor.service "$HOME/.termux/boot/pocketharbor"; do
+        if [ -f "$f" ]; then
+            sed -n 's/.*--listen \([^ ]*\).*/\1/p' "$f" | head -n 1
+            return
+        fi
+    done
+}
+
+# The systemd command that already runs this installation, if one does.
+systemd_runner() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    if [ -f /etc/systemd/system/pocketharbor.service ] && grep -q "PHARBOR_ROOT=$DATA\"" /etc/systemd/system/pocketharbor.service; then
+        echo systemctl
+    elif [ -f "$HOME/.config/systemd/user/pocketharbor.service" ] && grep -q "PHARBOR_ROOT=$DATA\"" "$HOME/.config/systemd/user/pocketharbor.service"; then
+        echo "systemctl --user"
+    else
+        return 1
+    fi
+}
+
 stop_proxy() {
     pid=$(proxy_pid) || return 0
     kill -TERM "$pid" 2>/dev/null || true
@@ -456,6 +483,10 @@ systemd_unit() {
 Description=PocketHarbor
 After=network-online.target
 Wants=network-online.target
+# A failure that repeats (a port taken, a program removed) stops after ten
+# tries in five minutes, instead of every five seconds for ever.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Environment="PHARBOR_ROOT=$DATA"
@@ -545,9 +576,16 @@ main() {
     case "$PLATFORM" in
         adb | android) [ -n "$ENGINE_ROOT" ] || ENGINE_ROOT=/data/local/tmp/pocketharbor/engine ;;
     esac
-    # An earlier install keeps its port.
+    # An earlier install keeps its port and its address: an update must not
+    # open to the network a dashboard that only listened on this device.
     if [ -z "$PORT" ] && [ -f "$DATA/settings.json" ]; then
         PORT=$(sed -n 's/.*"proxy_port": *\([0-9]*\).*/\1/p' "$DATA/settings.json" | head -n 1)
+    fi
+    if [ -z "$BIND" ] && [ -f "$DATA/settings.json" ]; then
+        listen=$(current_listen)
+        case "$listen" in
+            *:*) BIND=${listen%:*} ;;
+        esac
     fi
     [ -n "$PORT" ] || PORT=8080
     [ -n "$BIND" ] || BIND=0.0.0.0
@@ -764,8 +802,15 @@ main() {
         esac
     fi
 
+    # An update of an install that systemd runs goes through systemd too:
+    # started beside it, the proxy would find its port taken.
+    [ -n "$service" ] || service=$(systemd_runner) || service=""
+    if [ -n "$service" ]; then
+        $service reset-failed pocketharbor >/dev/null 2>&1 || true
+    fi
     if [ "$START" = 1 ] || [ $was_running = 1 ]; then
         if [ -n "$service" ]; then
+            $service daemon-reload >/dev/null 2>&1 || true
             $service restart pocketharbor || die "systemd could not start it; see: $service status pocketharbor"
         else
             PH serve -d --listen "$BIND:$PORT" || die "PocketHarbor did not start"
