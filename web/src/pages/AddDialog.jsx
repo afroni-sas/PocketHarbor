@@ -141,7 +141,7 @@ function rows() {
       { label: 'Database', icon: Database, more: true, run: () => go('database') },
       { label: 'Template', icon: LayoutTemplate, more: true, run: () => go('template') },
       { label: 'Docker Image', icon: Box, more: true, run: () => go('image') },
-      { label: 'Bucket', icon: Package, hint: 'S3 storage with MinIO', run: () => (templates.peek() || []).filter((t) => t.category === 'bucket').slice(0, 1).forEach(makeTemplate) },
+      { label: 'Bucket', icon: Package, hint: 'S3-compatible storage', run: () => (templates.peek() || []).filter((t) => t.category === 'bucket').slice(0, 1).forEach(makeTemplate) },
       { label: 'Volume', icon: HardDrive, more: true, run: () => go('volume') },
       { label: 'Empty Service', icon: Square, run: () => make({ name: uniqueName('service'), deploy: false }, 'Empty service created: connect a repository or an image in its settings') },
     ]
