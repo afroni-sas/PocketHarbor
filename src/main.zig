@@ -396,6 +396,8 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     sampler.detach();
     const checker = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, updates.watch, .{ c.store.root, c.eng.bin, c.envp, c.io });
     checker.detach();
+    const reviver = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, deploy.revive, .{ c.store.root, c.eng.bin, c.envp });
+    reviver.detach();
     try httpd.serveOn(try panelListener(c, s.panel_port), api.handle, panel);
 }
 

@@ -494,10 +494,22 @@ Environment="PDOCK_BIN=$INSTALL_DIR/pdock"
 ExecStart="$INSTALL_DIR/pharbor" serve --listen $BIND:$PORT
 Restart=on-failure
 RestartSec=5
+# Stopping or updating PocketHarbor leaves its services running, as it does
+# without systemd; the next start takes them back.
+KillMode=process
 
 [Install]
 WantedBy=$1
 UNIT
+}
+
+# Writes again, for this version, the unit that the systemd command $1 uses.
+refresh_unit() {
+    case "$1" in
+        systemctl) systemd_unit multi-user.target >/etc/systemd/system/pocketharbor.service ;;
+        *) systemd_unit default.target >"$HOME/.config/systemd/user/pocketharbor.service" ;;
+    esac
+    $1 daemon-reload >/dev/null 2>&1 || true
 }
 
 # Makes pharbor a command, and remembers a data directory other than the
@@ -758,6 +770,9 @@ main() {
     was_running=0
     if proxy_pid >/dev/null; then
         was_running=1
+        # systemd stops it with the unit it has then: an older one would take
+        # every service down with it.
+        if runner=$(systemd_runner); then refresh_unit "$runner"; fi
         stop_proxy
     fi
     if [ -n "$EMAIL" ]; then

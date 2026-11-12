@@ -50,7 +50,7 @@ Then it installs `pharbor` and `pdock`, checks their SHA-256 sums, starts everyt
 sh install.sh --yes --email you@example.com --cloudflare-token TOKEN
 ```
 
-`sh install.sh --help` lists every option; pass them after `sh -s --` when the script comes from curl. Run the installer again to update: the data, the settings and the port stay.
+`sh install.sh --help` lists every option; pass them after `sh -s --` when the script comes from curl. Run the installer again to update: the data, the settings, the address and the port stay, and the services keep running while it updates.
 
 From a computer with adb, push the release files and run the installer with `--from`; the release notes show how. A shell started by adb cannot start PocketHarbor at boot; Termux can.
 

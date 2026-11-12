@@ -191,7 +191,14 @@ pub fn watch(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
         var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
         if (first) {
             first = false;
-            if (store.settings().tunnel_id.len > 0) upgrade(store, &eng);
+            if (store.settings().tunnel_id.len > 0) {
+                upgrade(store, &eng);
+                // Stopped with PocketHarbor or by a restart of the device.
+                if (eng.inspect(container)) |info| if (!info.alive()) {
+                    sys.print("tunnel: starting cloudflared again\n", .{});
+                    if (!eng.start(container)) sys.eprint("tunnel: cloudflared did not start\n", .{});
+                };
+            }
         }
         sys.sleepMs(2000);
         if (!sleep.check(10 * std.time.ns_per_s)) continue;

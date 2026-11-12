@@ -85,6 +85,18 @@ pub fn queryScript(kind: Kind) []const u8 {
             \\exec redis-cli --no-raw
         ,
         .mongo => mongo_env ++
+            // mongosh shows its prompt when it reads a script from stdin, so
+            // the script goes to --eval, which also prints the last value; a
+            // script too long for one argument goes through a file.
+            \\if [ "${M##*/}" = mongosh ]; then
+            \\  q="$(cat)"
+            \\  [ "${#q}" -lt 100000 ] && exec "$M" "$@" --eval "$q"
+            \\  f="$(mktemp)"
+            \\  printf '%s\n' "$q" > "$f"
+            \\  "$M" "$@" --file "$f"; r=$?
+            \\  rm -f "$f"
+            \\  exit "$r"
+            \\fi
             \\exec "$M" "$@"
         ,
     };
