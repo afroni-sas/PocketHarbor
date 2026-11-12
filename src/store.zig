@@ -116,6 +116,9 @@ pub const Settings = struct {
     /// DNS records of the public names itself.
     cloudflare_token: []const u8 = "",
     cloudflare_account: []const u8 = "",
+    /// The zone that serves domains whose DNS is elsewhere, through
+    /// Cloudflare for SaaS; empty for none.
+    cloudflare_saas_zone: []const u8 = "",
 };
 
 /// Names end up in hostnames and file paths.

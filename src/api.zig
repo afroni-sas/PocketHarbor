@@ -446,6 +446,8 @@ fn domainsView(c: *Ctx, svc: Service) !void {
         record_detail: []const u8 = "",
         /// False when Cloudflare's free certificate would not cover it.
         certificate: bool = true,
+        /// For a name whose DNS is elsewhere: whether Cloudflare serves it.
+        foreign_active: bool = false,
         status: ?domains.Status = null,
         via: []const u8 = "",
         detail: []const u8 = "",
@@ -464,6 +466,16 @@ fn domainsView(c: *Ctx, svc: Service) !void {
             if (edge.outcomeOf(state, pair[1])) |o| {
                 view.record = o.state;
                 view.record_detail = o.detail;
+                if (o.state == .foreign) {
+                    // Its owner adds these where its DNS is; the zone shown
+                    // is the name's own.
+                    const recs = try c.a.alloc(domains.Record, o.records.len);
+                    for (o.records, 0..) |r, k| recs[k] = .{ .type = r.type, .name = r.name, .value = r.content };
+                    view.records = recs;
+                    view.foreign_active = o.active;
+                    try out.append(c.a, view);
+                    continue;
+                }
                 if (o.zone.len > 0) {
                     view.zone = o.zone;
                     view.certificate = cloudflare.certificateCovers(o.zone, pair[0]);
@@ -497,6 +509,7 @@ fn domainsView(c: *Ctx, svc: Service) !void {
     };
     return c.res.json(200, .{
         .managed = managed,
+        .saas_zone = s.cloudflare_saas_zone,
         .synced_at = state.synced_at,
         .sync_error = state.@"error",
         .zones = state.zones,
@@ -592,6 +605,7 @@ fn domainName(c: *Ctx) !void {
         .valid = true,
         .owner = owner,
         .managed = managed,
+        .saas = managed and s.cloudflare_saas_zone.len > 0,
         .zone = zone,
         .certificate = zone.len == 0 or cloudflare.certificateCovers(zone, name),
     });
@@ -618,6 +632,7 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             .permissions = cloudflare.token_permissions,
             .create_url = create_url,
             .connector = if (edge.connected(c.store)) connectorState(c) else "",
+            .saas_zone = s.cloudflare_saas_zone,
             .state = state,
         });
     }
@@ -632,6 +647,25 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
         startConnector(c);
         return c.res.json(200, .{ .connected = true, .connector = "starting", .state = state });
+    }
+    if (seg.len == 0 and method(c, "PATCH")) {
+        if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");
+        const body = c.req.json(struct { saas_zone: []const u8 }) catch return c.res.fail(400, "send saas_zone");
+        if (body.saas_zone.len > 0) {
+            var known = false;
+            for (edge.load(c.store).zones) |z| known = known or eql(z, body.saas_zone);
+            if (!known) return c.res.fail(400, "that is not one of the account's zones");
+        }
+        {
+            const lock = try c.store.lock();
+            defer c.store.unlock(lock);
+            var s = c.store.settings();
+            s.cloudflare_saas_zone = body.saas_zone;
+            try c.store.saveSettings(s);
+        }
+        const state = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch |e|
+            return c.res.fail(502, if (failure.message.len > 0) failure.message else @errorName(e));
+        return c.res.json(200, .{ .connected = true, .state = state });
     }
     if (seg.len == 1 and eql(seg[0], "start") and method(c, "POST")) {
         if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");

@@ -197,7 +197,54 @@ function disconnectCloudflare() {
   })
 }
 
-const recordWords = { ready: 'Ready', conflict: 'Left alone', no_zone: 'No zone', failed: 'Failed' }
+const recordWords = { ready: 'Ready', conflict: 'Left alone', no_zone: 'No zone', failed: 'Failed', foreign: 'DNS elsewhere' }
+
+async function setSaasZone(e) {
+  e.preventDefault()
+  const zone = e.currentTarget.elements.zone.value
+  starting.value = true
+  try {
+    await patch('/cloudflare', { saas_zone: zone })
+    toast(zone ? `${zone} now serves domains whose DNS is elsewhere` : 'Domains whose DNS is elsewhere are off', 'success')
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    starting.value = false
+    await load('networking')
+  }
+}
+
+function SaasZone({ cf }) {
+  const st = cf.state || {}
+  const zones = st.zones || []
+  if (zones.length === 0) return null
+  return (
+    <div class="cf-saas">
+      <b>Domains whose DNS is elsewhere</b>
+      <p class="muted small">
+        A domain in another Cloudflare account, at a free subdomain service or at any other provider works with two records added where its DNS is, as on Railway. One of your zones serves it, through Cloudflare for SaaS: turn it on for that zone in Cloudflare (SSL/TLS › Custom Hostnames › Enable; Cloudflare asks for payment details, and the first 100 names are free), and give the token <span class="mono">Zone › SSL and Certificates › Edit</span>.
+      </p>
+      <form class="row" onSubmit={setSaasZone}>
+        <select class="select" name="zone" defaultValue={cf.saas_zone} key={cf.saas_zone} style="flex:1" aria-label="Zone serving outside domains">
+          <option value="">Off</option>
+          {zones.map((z) => (
+            <option key={z} value={z}>
+              {z}
+            </option>
+          ))}
+        </select>
+        <button class="btn" disabled={starting.value}>
+          Save
+        </button>
+      </form>
+      {cf.saas_zone && st.origin && (
+        <p class="muted small" style="margin:6px 0 0">
+          Such domains point at <span class="mono">{st.origin}</span>.
+        </p>
+      )}
+    </div>
+  )
+}
 
 // While cloudflared starts, the card asks again every few seconds.
 let connectorTimer = 0
@@ -275,14 +322,15 @@ function CloudflareCard() {
             <div class="cf-hosts">
               {st.hosts.map((h) => (
                 <div class="cf-host" key={h.host}>
-                  <span class={`dot ${h.state === 'ready' ? 'green' : 'yellow'}`} />
+                  <span class={`dot ${h.state === 'ready' || (h.state === 'foreign' && h.active) ? 'green' : 'yellow'}`} />
                   <span class="mono">{h.host}</span>
-                  <span class="muted small">{recordWords[h.state]}</span>
+                  <span class="muted small">{h.state === 'foreign' ? (h.active ? 'Ready, DNS elsewhere' : 'Waiting for its records') : recordWords[h.state]}</span>
                   {h.detail && <span class="muted small cf-detail">{h.detail}</span>}
                 </div>
               ))}
             </div>
           )}
+          <SaasZone cf={cf} />
         </>
       ) : (
         <>

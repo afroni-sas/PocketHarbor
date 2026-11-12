@@ -21,6 +21,10 @@ pub const State = struct {
     /// Every zone of the account, for the names a domain can use.
     zones: []const []const u8 = &.{},
     hosts: []const cloudflare.Outcome = &.{},
+    /// Where domains whose DNS is elsewhere point: pharbor-origin.ZONE.
+    origin: []const u8 = "",
+    /// The custom hostnames PocketHarbor made, the only ones it removes.
+    custom: []const struct { hostname: []const u8, id: []const u8 } = &.{},
 };
 
 pub fn load(store: Store) State {
@@ -165,20 +169,41 @@ pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: St
         state.@"error" = cf.message;
         save(store, state);
     }
-    const hosts = try publicHosts(a, store);
-    const origin = try tunnel.originUrl(store);
-    const rules = try a.alloc(cloudflare.Rule, hosts.len);
-    for (hosts, 0..) |h, i| rules[i] = .{ .hostname = h, .service = origin };
-    try cf.setRoutes(a, s.cloudflare_account, s.tunnel_id, rules);
-
     const zones = try cf.zones(a);
     var names: std.ArrayList([]const u8) = .empty;
     for (zones) |z| try names.append(a, z.name);
     state.zones = names.items;
+
+    // Domains of other accounts or providers reach the tunnel through the
+    // zone chosen for them, at pharbor-origin.ZONE.
+    var saas: ?cloudflare.Zone = null;
+    for (zones) |z| {
+        if (s.cloudflare_saas_zone.len > 0 and std.ascii.eqlIgnoreCase(z.name, s.cloudflare_saas_zone)) saas = z;
+    }
+    const public = try publicHosts(a, store);
+    var hosts_list: std.ArrayList([]const u8) = .empty;
+    try hosts_list.appendSlice(a, public);
+    if (saas) |z| {
+        state.origin = try std.fmt.allocPrint(a, "{s}.{s}", .{ cloudflare.origin_label, z.name });
+        try hosts_list.append(a, state.origin);
+    }
+    const hosts = hosts_list.items;
+
+    const service = try tunnel.originUrl(store);
+    const rules = try a.alloc(cloudflare.Rule, hosts.len);
+    for (hosts, 0..) |h, i| rules[i] = .{ .hostname = h, .service = service };
+    try cf.setRoutes(a, s.cloudflare_account, s.tunnel_id, rules);
+
     const target = try std.fmt.allocPrint(a, "{s}.cfargotunnel.com", .{s.tunnel_id});
     var outcomes: std.ArrayList(cloudflare.Outcome) = .empty;
+    var foreign: std.ArrayList([]const u8) = .empty;
     for (hosts) |h| {
-        if (cloudflare.zoneFor(zones, h) == null) try outcomes.append(a, .{ .host = h, .state = .no_zone, .detail = "no zone of the Cloudflare account holds this name" });
+        if (cloudflare.zoneFor(zones, h) != null) continue;
+        if (saas != null) {
+            try foreign.append(a, h);
+        } else {
+            try outcomes.append(a, .{ .host = h, .state = .no_zone, .detail = "no zone of the Cloudflare account holds this name" });
+        }
     }
     // Zones with a name to write, and those that may hold records to remove.
     const previous = load(store);
@@ -213,9 +238,73 @@ pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: St
         }
         for (p.remove) |r| cf.deleteRecord(a, z.id, r.id) catch {};
     }
+    try syncForeign(a, &cf, saas, state.origin, foreign.items, previous, &state, &outcomes);
     state.hosts = outcomes.items;
     save(store, state);
     return state;
+}
+
+/// Makes the chosen zone serve each foreign name, and removes the custom
+/// hostnames PocketHarbor made for names that are gone.
+fn syncForeign(
+    a: Allocator,
+    cf: *cloudflare.Client,
+    saas: ?cloudflare.Zone,
+    origin: []const u8,
+    foreign: []const []const u8,
+    previous: State,
+    state: *State,
+    outcomes: *std.ArrayList(cloudflare.Outcome),
+) !void {
+    const Custom = @typeInfo(@TypeOf(state.custom)).pointer.child;
+    var kept: std.ArrayList(Custom) = .empty;
+    const z = saas orelse {
+        // Kept, so that choosing the zone again finds them.
+        state.custom = previous.custom;
+        return;
+    };
+    // Without its fallback origin, a zone serves no custom hostname.
+    var refused: []const u8 = "";
+    cf.setFallbackOrigin(a, z.id, origin) catch {
+        refused = try std.fmt.allocPrint(a, "{s}: turn on Cloudflare for SaaS for {s} (SSL/TLS, Custom Hostnames) and give the token SSL and Certificates: Edit", .{ cf.message, z.name });
+    };
+    const existing: []const cloudflare.CustomHostname = if (refused.len > 0) &.{} else cf.customHostnames(a, z.id) catch blk: {
+        refused = cf.message;
+        break :blk &.{};
+    };
+    for (foreign) |h| {
+        if (refused.len > 0) {
+            try outcomes.append(a, .{ .host = h, .state = .failed, .zone = z.name, .detail = refused });
+            continue;
+        }
+        var found: ?cloudflare.CustomHostname = null;
+        for (existing) |ch| {
+            if (std.ascii.eqlIgnoreCase(ch.hostname, h)) found = ch;
+        }
+        const ch = found orelse cf.createCustomHostname(a, z.id, h) catch {
+            try outcomes.append(a, .{ .host = h, .state = .failed, .zone = z.name, .detail = cf.message });
+            continue;
+        };
+        try kept.append(a, .{ .hostname = h, .id = ch.id });
+        var detail: []const u8 = "";
+        if (ch.verification_errors.len > 0) detail = ch.verification_errors[0];
+        if (detail.len == 0 and ch.ssl.validation_errors.len > 0) detail = ch.ssl.validation_errors[0].message;
+        try outcomes.append(a, .{
+            .host = h,
+            .state = .foreign,
+            .zone = z.name,
+            .detail = detail,
+            .records = try cloudflare.foreignRecords(a, h, origin, ch),
+            .active = ch.active(),
+        });
+    }
+    // Only names PocketHarbor made itself, and that nothing wants any more.
+    for (previous.custom) |c| {
+        var wanted = false;
+        for (foreign) |h| wanted = wanted or std.ascii.eqlIgnoreCase(h, c.hostname);
+        if (!wanted) cf.deleteCustomHostname(a, z.id, c.id) catch {};
+    }
+    state.custom = kept.items;
 }
 
 /// Removes the records PocketHarbor wrote, stops the tunnel and forgets the

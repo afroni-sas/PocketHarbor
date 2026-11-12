@@ -1321,6 +1321,7 @@ fn printEdge(state: edge.State) void {
     for (state.hosts) |h| {
         const what: []const u8 = switch (h.state) {
             .ready => "ready",
+            .foreign => if (h.active) "ready" else "waiting",
             .conflict => "left alone",
             .no_zone => "no zone",
             .failed => "failed",
