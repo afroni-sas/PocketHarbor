@@ -435,9 +435,9 @@ test "tokens and account ids" {
     try t.expect(accountToken("cfat_abc"));
     try t.expect(!accountToken("cfut_abc"));
     try t.expect(!accountToken("Ab12cd"));
-    try t.expect(validAccount("11dae778e61a9ce2d2ca76b739cc3743"));
-    try t.expect(!validAccount("11dae778e61a9ce2d2ca76b739cc374"));
-    try t.expect(!validAccount("11dae778e61a9ce2d2ca76b739cc374z"));
+    try t.expect(validAccount("0123456789abcdef0123456789abcdef"));
+    try t.expect(!validAccount("0123456789abcdef0123456789abcde"));
+    try t.expect(!validAccount("0123456789abcdef0123456789abcdez"));
 }
 
 test "a name belongs to the longest zone it ends with" {

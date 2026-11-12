@@ -616,9 +616,9 @@ test "the hub is never one of the services' Workers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const got = try serviceScripts(arena.allocator(), "pocketharbor-02f48b", &.{
-        "shop-web-02f48b.abdou-11d.workers.dev",
-        "pocketharbor-02f48b.abdou-11d.workers.dev",
-        "api-02f48b.abdou-11d.workers.dev",
+        "shop-web-02f48b.oldname.workers.dev",
+        "pocketharbor-02f48b.oldname.workers.dev",
+        "api-02f48b.oldname.workers.dev",
     });
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expectEqualStrings("shop-web-02f48b", got[0]);
@@ -629,8 +629,8 @@ test "names move with a renamed workers.dev subdomain" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("ph-43ae70081f.pharbor.workers.dev", try moveHost(a, "ph-43ae70081f.abdou-11d.workers.dev", "abdou-11d", "pharbor"));
-    try std.testing.expectEqualStrings("app.snacki.africa", try moveHost(a, "app.snacki.africa", "abdou-11d", "pharbor"));
-    try std.testing.expectEqualStrings("x.other.workers.dev", try moveHost(a, "x.other.workers.dev", "abdou-11d", "pharbor"));
-    try std.testing.expectEqualStrings("", try moveHost(a, "", "abdou-11d", "pharbor"));
+    try std.testing.expectEqualStrings("ph-0a1b2c3d4e.newname.workers.dev", try moveHost(a, "ph-0a1b2c3d4e.oldname.workers.dev", "oldname", "newname"));
+    try std.testing.expectEqualStrings("app.example.com", try moveHost(a, "app.example.com", "oldname", "newname"));
+    try std.testing.expectEqualStrings("x.other.workers.dev", try moveHost(a, "x.other.workers.dev", "oldname", "newname"));
+    try std.testing.expectEqualStrings("", try moveHost(a, "", "oldname", "newname"));
 }
