@@ -466,6 +466,12 @@ fn domainsView(c: *Ctx, svc: Service) !void {
             if (edge.outcomeOf(state, pair[1])) |o| {
                 view.record = o.state;
                 view.record_detail = o.detail;
+                if (o.state == .relay) {
+                    // Served through the relay: no DNS record to add.
+                    view.records = &.{};
+                    try out.append(c.a, view);
+                    continue;
+                }
                 if (o.state == .foreign) {
                     // Its owner adds these where its DNS is; the zone shown
                     // is the name's own.
@@ -509,6 +515,8 @@ fn domainsView(c: *Ctx, svc: Service) !void {
     };
     return c.res.json(200, .{
         .managed = managed,
+        .relay_ready = managed and s.relay_url.len > 0,
+        .relay_error = state.relay_error,
         .saas_zone = s.cloudflare_saas_zone,
         .synced_at = state.synced_at,
         .sync_error = state.@"error",
@@ -633,6 +641,11 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             .create_url = create_url,
             .connector = if (edge.connected(c.store)) connectorState(c) else "",
             .saas_zone = s.cloudflare_saas_zone,
+            .relay = .{
+                .ready = s.relay_url.len > 0,
+                .dashboard = if (edge.isRelayHost(s, s.panel_domain)) s.panel_domain else "",
+                .@"error" = state.relay_error,
+            },
             .state = state,
         });
     }
@@ -986,6 +999,14 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
     const what = seg[1];
     if (eql(what, "variables")) return variables(c, svc.project, svc.environment, svc.name, seg[2..]);
     if (eql(what, "domains") and seg.len == 2 and method(c, "GET")) return domainsView(c, svc);
+    if (eql(what, "generate-domain") and method(c, "POST")) {
+        if (!edge.connected(c.store)) return c.res.fail(409, "connect Cloudflare first, in Settings > Public access");
+        var failure: edge.Failure = .{ .err = error.None, .message = "" };
+        const host = edge.generateDomain(c.a, c.a, c.panel.io, c.panel.key, c.store, id, &failure) catch |e|
+            return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
+        syncEdge(c);
+        return c.res.json(200, .{ .domain = host });
+    }
     if (eql(what, "deploy") and method(c, "POST")) {
         if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");
         startDeploy(c, id, "api");

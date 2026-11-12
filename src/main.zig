@@ -19,6 +19,7 @@ const dns = @import("dns.zig");
 const github = @import("github.zig");
 const domain_check = @import("domains.zig");
 const edge = @import("edge.zig");
+const relay = @import("relay.zig");
 const cloudflare = @import("cloudflare.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
@@ -204,6 +205,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "_sleep", cmdSleep },
         .{ "_deploy", cmdDeployJob },
         .{ "_connector", cmdConnector },
+        .{ "_relay", cmdRelay },
         .{ "_panel", cmdPanel },
         .{ "user", cmdUser },
         .{ "token", cmdToken },
@@ -327,6 +329,18 @@ fn keepAlive() void {
 /// Runs the panel next to the proxy, restarting it if it dies, and going away
 /// with the proxy.
 fn startPanel(c: *Ctx) void {
+    supervise(c, "_panel");
+}
+
+/// The relay's client keeps its WebSocket to Cloudflare; it idles while no
+/// relay is set up.
+fn startRelay(c: *Ctx) void {
+    supervise(c, "_relay");
+}
+
+/// Runs `pharbor VERB` next to the proxy, again if it dies, and goes away
+/// with the proxy.
+fn supervise(c: *Ctx, comptime verb: [:0]const u8) void {
     const PR_SET_PDEATHSIG = 1;
     const pid = sys.fork() catch return;
     if (pid != 0) return;
@@ -335,7 +349,7 @@ fn startPanel(c: *Ctx) void {
         const worker = sys.fork() catch linux.exit_group(1);
         if (worker == 0) {
             _ = linux.prctl(PR_SET_PDEATHSIG, @intFromEnum(linux.SIG.TERM), 0, 0, 0);
-            const argv = [_:null]?[*:0]const u8{ "pharbor", "_panel" };
+            const argv = [_:null]?[*:0]const u8{ "pharbor", verb };
             _ = linux.execve("/proc/self/exe", &argv, c.envp);
             linux.exit_group(127);
         }
@@ -824,6 +838,7 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
         keepAlive();
     }
     startPanel(c);
+    startRelay(c);
     var s = c.store.settings();
     s.proxy_port = addr.port;
     try c.store.saveSettings(s);
@@ -1307,6 +1322,36 @@ fn cmdCloudflare(c: *Ctx, args: []const [:0]const u8) !void {
     die("usage: pharbor cloudflare connect|sync|status|disconnect", .{});
 }
 
+const RelaySource = struct {
+    root: []const u8,
+    key: crypto.Key,
+    env: *std.process.Environ.Map,
+    arena: *std.heap.ArenaAllocator,
+};
+
+/// Where the relay's client connects, read again before each attempt.
+/// PHARBOR_RELAY_URL and PHARBOR_RELAY_SECRET replace the settings, for tests.
+fn relayConfig(src: *const RelaySource) ?relay.Config {
+    _ = src.arena.reset(.retain_capacity);
+    const a = src.arena.allocator();
+    const store: store_mod.Store = .{ .a = a, .root = src.root };
+    const s = store.settings();
+    if (src.env.get("PHARBOR_RELAY_URL")) |url| {
+        return .{ .url = a.dupe(u8, url) catch return null, .secret = a.dupe(u8, src.env.get("PHARBOR_RELAY_SECRET") orelse "") catch return null, .proxy_port = s.proxy_port };
+    }
+    if (s.relay_url.len == 0 or s.relay_secret.len == 0) return null;
+    const secret = crypto.open(a, src.key, s.relay_secret) catch return null;
+    return .{ .url = s.relay_url, .secret = secret, .proxy_port = s.proxy_port };
+}
+
+fn cmdRelay(c: *Ctx, args: []const [:0]const u8) !void {
+    _ = args;
+    const key = crypto.loadKey(c.store.root) catch die("cannot read the master key", .{});
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    const src: RelaySource = .{ .root = c.store.root, .key = key, .env = c.env, .arena = &arena };
+    relay.loop(std.heap.smp_allocator, c.io, &src, relayConfig);
+}
+
 /// The dashboard's background start of cloudflared.
 fn cmdConnector(c: *Ctx, args: []const [:0]const u8) !void {
     _ = args;
@@ -1320,7 +1365,7 @@ fn printEdge(state: edge.State) void {
     if (state.@"error".len > 0) sys.print("Last sync failed: {s}\n", .{state.@"error"});
     for (state.hosts) |h| {
         const what: []const u8 = switch (h.state) {
-            .ready => "ready",
+            .ready, .relay => "ready",
             .foreign => if (h.active) "ready" else "waiting",
             .conflict => "left alone",
             .no_zone => "no zone",

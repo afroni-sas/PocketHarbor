@@ -74,6 +74,10 @@ function relative(name, zone) {
 }
 
 function stateOf(d, info) {
+  if (d.record === 'relay') {
+    if (!d.status || d.status === 'active') return { text: !d.status && domainInfo.value.checking ? 'Checking' : '', warn: false }
+    return { text: 'Not reachable yet: the phone is connecting to the relay', warn: true, noRecords: true }
+  }
   if (d.record === 'foreign') return d.foreign_active || d.status === 'active' ? { text: '', warn: false } : { text: 'Waiting for DNS update', warn: true }
   if (d.record === 'no_zone') return { text: 'Not in your Cloudflare zones', warn: true }
   if (d.record === 'conflict') return { text: 'Another DNS record holds this name', warn: true }
@@ -301,8 +305,8 @@ function Row({ svc, d, info, update }) {
             {state.text && (
               <>
                 {' · '}
-                {state.text === 'Checking DNS' ? <span class="muted">{state.text}</span> : state.text}
-                {state.text !== 'Checking DNS' && (
+                {state.text === 'Checking DNS' || state.text === 'Checking' ? <span class="muted">{state.text}</span> : state.text}
+                {state.text !== 'Checking DNS' && state.text !== 'Checking' && !state.noRecords && (
                   <>
                     {' · '}
                     <button class="linkish" onClick={() => showDnsRecords(svc.id, d.domain)}>
@@ -312,7 +316,7 @@ function Row({ svc, d, info, update }) {
                 )}
               </>
             )}
-            {!state.text && d.status === 'active' && d.records.length > 0 && custom && (
+            {!state.text && d.status === 'active' && d.records.length > 0 && custom && d.record !== 'relay' && (
               <>
                 {' · '}
                 <button class="linkish quiet" onClick={() => showDnsRecords(svc.id, d.domain)}>
@@ -519,10 +523,49 @@ function CustomForm({ svc, update }) {
   )
 }
 
-/** A working name in one of the Cloudflare zones, or a temporary address. */
+async function generateRelayDomain(svc, update, port) {
+  draft.value = { ...draft.peek(), busy: true, error: '' }
+  try {
+    await savePort(svc, update, port)
+    const res = await post(`/services/${enc(svc.id)}/generate-domain`)
+    form.value = ''
+    draft.value = { domain: '', prefix: '', zone: '', port: '', error: '', busy: false }
+    toast(`${res.domain} is ready`, 'success')
+    await loadDomains(svc.id)
+  } catch (err) {
+    draft.value = { ...draft.peek(), busy: false, error: err.message }
+  }
+}
+
+/** Railway's Generate Service Domain: an address on workers.dev through the
+ * relay; without it, a name in one of the Cloudflare zones, or a temporary
+ * address. */
 function GenerateForm({ svc, update, info, quickTunnel }) {
   const v = draft.value
   const zones = info.zones || []
+  if (info.relay_ready) {
+    return (
+      <form
+        class="net-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          generateRelayDomain(svc, update, portOf(v.port))
+        }}
+      >
+        <b>Generate Service Domain</b>
+        <label for="gen-port">Enter the port your app is listening on</label>
+        <input class="input" id="gen-port" type="number" min="1" max="65535" placeholder={String(svc.port || 8080)} value={v.port} autofocus onInput={(e) => (draft.value = { ...draft.peek(), port: e.currentTarget.value, error: '' })} />
+        <Foot hint={v.error || 'Choose your target port'} error={!!v.error}>
+          <button type="button" class="btn sm" onClick={() => (form.value = '')}>
+            Cancel
+          </button>
+          <button class="btn primary sm" disabled={v.busy}>
+            {v.busy && <Spinner />} Generate Domain
+          </button>
+        </Foot>
+      </form>
+    )
+  }
   if (info.managed && zones.length === 0) {
     return (
       <div class="net-form">
