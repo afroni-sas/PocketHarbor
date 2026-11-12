@@ -1372,6 +1372,9 @@ fn cmdRelay(c: *Ctx, args: []const [:0]const u8) !void {
     const key = crypto.loadKey(c.store.root) catch die("cannot read the master key", .{});
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     var src: RelaySource = .{ .root = c.store.root, .key = key, .env = c.env, .arena = &arena, .io = c.io };
+    // The tunnel's watch shares this long-lived process: both keep the phone
+    // reachable after the network or the device went away for a while.
+    if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, tunnel.watch, .{ c.store.root, c.eng.bin, c.envp })) |th| th.detach() else |_| {}
     relay.loop(std.heap.smp_allocator, c.io, &src, relayConfig, relayHeal);
 }
 

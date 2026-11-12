@@ -36,8 +36,8 @@ pub fn quick(store: Store, eng: *Engine, id: []const u8) !void {
 
     eng.remove(container);
     const args = [_][]const u8{
-        "run",           "-d",     "--name", container, "--restart", "always", "--host-gateway",
-        image,           "tunnel", "--url",  try originUrl(store),
+        "run",           "-d",     "--name",     container, "--restart", "always", "--host-gateway",
+        image,           "tunnel", "--protocol", protocol,  "--url",     try originUrl(store),
     };
     if (try eng.run(&args) != 0) return error.TunnelFailed;
 
@@ -70,6 +70,13 @@ fn tunnelId(a: std.mem.Allocator, token: []const u8) ?[]const u8 {
 /// Where cloudflared finds the token, inside its container.
 const token_dir = "/etc/pharbor-tunnel";
 
+/// cloudflared prefers QUIC, over UDP. A QUIC connection keeps its socket
+/// across reconnections, and once the network changed under it (the
+/// device slept, Wi-Fi came back) every retry fails on that dead socket.
+/// HTTP/2 runs over TCP and opens a fresh connection each time; it also
+/// passes where UDP is filtered.
+const protocol = "http2";
+
 /// A permanent tunnel. Its token goes in a file only this user can read,
 /// which the container gets read-only: on a command line or in the
 /// container's environment, any process listing would show it.
@@ -81,8 +88,9 @@ pub fn named(store: Store, eng: *Engine, token: []const u8) !void {
     try sys.writeFileAtomic(store.path("tunnel/token"), token, 0o600);
     const mount = try std.fmt.allocPrint(a, "{s}:{s}:ro", .{ dir, token_dir });
     const args = [_][]const u8{
-        "run",  "-d",    "--name", container, "--restart", "always", "--host-gateway",
-        "-v",   mount,   image,    "tunnel",  "run",       "--token-file", token_dir ++ "/token",
+        "run",    "-d",       "--name", container, "--restart", "always",       "--host-gateway",
+        "-v",     mount,      image,    "tunnel",  "--protocol", protocol, "run", "--token-file",
+        token_dir ++ "/token",
     };
     if (try eng.run(&args) != 0) return error.TunnelFailed;
 
@@ -151,3 +159,46 @@ test "finds the URL in cloudflared's banner" {
     try t.expectEqualStrings("https://calm-river-1a2b.trycloudflare.com", findUrl(text).?);
     try t.expect(findUrl("nothing here") == null);
 }
+
+/// Whether the tunnel's container runs cloudflared with `protocol`.
+fn current(eng: *Engine) bool {
+    const argv = eng.argvOf(container) orelse return true;
+    for (argv) |arg| if (std.mem.eql(u8, arg, protocol)) return true;
+    return false;
+}
+
+/// Made again a tunnel made by an earlier version, with QUIC: from the
+/// token kept for it, so nothing is asked of Cloudflare.
+pub fn upgrade(store: Store, eng: *Engine) void {
+    if (current(eng)) return;
+    const token = sys.readFileAlloc(store.a, store.path("tunnel/token"), 16 << 10) catch return;
+    sys.print("tunnel: starting cloudflared again over {s}\n", .{protocol});
+    named(store, eng, std.mem.trim(u8, token, " \r\n\t")) catch |e| sys.eprint("tunnel: {s}\n", .{@errorName(e)});
+}
+
+/// Keeps cloudflared connected for good: an old tunnel is made again over
+/// HTTP/2, and when the device wakes up the connector starts again at once
+/// rather than waiting for its connections to be found dead.
+pub fn watch(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    var sleep = sys.SleepWatch.init();
+    var first = true;
+    while (true) {
+        _ = arena.reset(.retain_capacity);
+        const a = arena.allocator();
+        const store: Store = .{ .a = a, .root = root };
+        var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
+        if (first) {
+            first = false;
+            if (store.settings().tunnel_id.len > 0) upgrade(store, &eng);
+        }
+        sys.sleepMs(2000);
+        if (!sleep.check(10 * std.time.ns_per_s)) continue;
+        const info = eng.inspect(container) orelse continue;
+        if (!info.alive()) continue;
+        sys.print("tunnel: the device slept; restarting cloudflared\n", .{});
+        if (!eng.restart(container)) sys.eprint("tunnel: cloudflared did not restart\n", .{});
+    }
+}
+
