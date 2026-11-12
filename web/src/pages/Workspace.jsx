@@ -312,6 +312,25 @@ function CloudflareCard() {
             </button>
           </div>
           <ConnectorLine state={cf.connector} />
+          {cf.relay && cf.relay.ready && (
+            <div class="cf-connector green">
+              <span class="dot green" /> Relay ready: Generate Domain gives each service an address on workers.dev
+              {cf.relay.dashboard && (
+                <>
+                  , and this dashboard answers at{' '}
+                  <a class="mono" href={`https://${cf.relay.dashboard}`} target="_blank" rel="noreferrer">
+                    {cf.relay.dashboard}
+                  </a>
+                </>
+              )}
+              .
+            </div>
+          )}
+          {cf.relay && !cf.relay.ready && cf.relay.error && (
+            <div class="banner warn">
+              The relay could not be deployed: {cf.relay.error}. Give the token Account › Workers Scripts › Edit, then press Sync now.
+            </div>
+          )}
           {st.error && <div class="banner warn">{st.error}</div>}
           <p class="muted small" style="margin:8px 0 0">
             {st.zones && st.zones.length

@@ -119,6 +119,14 @@ pub const Settings = struct {
     /// The zone that serves domains whose DNS is elsewhere, through
     /// Cloudflare for SaaS; empty for none.
     cloudflare_saas_zone: []const u8 = "",
+    /// The relay PocketHarbor deployed to Cloudflare Workers: where the
+    /// phone connects (wss://...), its secret (encrypted), the account's
+    /// workers.dev subdomain, the hub script and the code's version.
+    relay_url: []const u8 = "",
+    relay_secret: []const u8 = "",
+    relay_subdomain: []const u8 = "",
+    relay_hub: []const u8 = "",
+    relay_version: []const u8 = "",
 };
 
 /// Names end up in hostnames and file paths.

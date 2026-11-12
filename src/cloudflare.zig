@@ -12,9 +12,10 @@ pub const api_root = "https://api.cloudflare.com/client/v4";
 /// The comment on every DNS record PocketHarbor writes.
 pub const record_comment = "Managed by PocketHarbor";
 
-/// A token made with these permissions is all it takes. The last one is for
+/// A token made with these permissions is all it takes. Workers Scripts is
+/// for the relay and its workers.dev addresses; SSL and Certificates for
 /// domains whose DNS is elsewhere (Cloudflare for SaaS).
-pub const token_permissions = "Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read, Zone: SSL and Certificates: Edit";
+pub const token_permissions = "Account: Workers Scripts: Edit, Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read, Zone: SSL and Certificates: Edit";
 
 /// The name, in the zone chosen for them, that domains whose DNS is
 /// elsewhere point at: Cloudflare's "fallback origin".
@@ -69,6 +70,10 @@ pub const Client = struct {
 
     /// Calls the API and returns the envelope's `result`, parsed as T.
     fn call(self: *Client, a: Allocator, comptime T: type, method: std.http.Method, path: []const u8, body: ?[]const u8) !T {
+        return self.callTyped(a, T, method, path, body, "application/json");
+    }
+
+    fn callTyped(self: *Client, a: Allocator, comptime T: type, method: std.http.Method, path: []const u8, body: ?[]const u8, content_type: []const u8) !T {
         var http: std.http.Client = .{ .allocator = self.gpa, .io = self.io };
         defer http.deinit();
         const url = try std.fmt.allocPrint(a, "{s}{s}", .{ self.api, path });
@@ -80,7 +85,7 @@ pub const Client = struct {
                 .accept_encoding = .omit,
                 .user_agent = .{ .override = "pocketharbor" },
                 .authorization = .{ .override = auth },
-                .content_type = if (body != null) .{ .override = "application/json" } else .default,
+                .content_type = if (body != null) .{ .override = content_type } else .default,
             },
         }) catch return self.unreachable_("Cloudflare could not be reached");
         defer req.deinit();
@@ -232,6 +237,42 @@ pub const Client = struct {
         _ = try self.call(a, std.json.Value, .DELETE, path, null);
     }
 
+    /// The account's name under workers.dev, chosen once per account.
+    pub fn workersSubdomain(self: *Client, a: Allocator, account: []const u8) ![]const u8 {
+        const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/subdomain", .{account});
+        const got = try self.call(a, struct { subdomain: []const u8 = "" }, .GET, path, null);
+        if (got.subdomain.len == 0) return error.CloudflareError;
+        return got.subdomain;
+    }
+
+    pub fn createWorkersSubdomain(self: *Client, a: Allocator, account: []const u8, name: []const u8) ![]const u8 {
+        const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/subdomain", .{account});
+        const body = try std.json.Stringify.valueAlloc(a, .{ .subdomain = name }, .{});
+        const got = try self.call(a, struct { subdomain: []const u8 = "" }, .PUT, path, body);
+        return got.subdomain;
+    }
+
+    /// Uploads a Worker: `metadata` is its JSON description, `code` its
+    /// single module, relay.js.
+    pub fn uploadWorker(self: *Client, a: Allocator, account: []const u8, name: []const u8, metadata: []const u8, code: []const u8) !void {
+        const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/scripts/{s}", .{ account, name });
+        const boundary = "pocketharbor-relay-boundary-7f3a9c";
+        const body = try std.fmt.allocPrint(a, "--{s}\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata.json\"\r\nContent-Type: application/json\r\n\r\n{s}\r\n" ++
+            "--{s}\r\nContent-Disposition: form-data; name=\"relay.js\"; filename=\"relay.js\"\r\nContent-Type: application/javascript+module\r\n\r\n{s}\r\n--{s}--\r\n", .{ boundary, metadata, boundary, code, boundary });
+        _ = try self.callTyped(a, std.json.Value, .PUT, path, body, "multipart/form-data; boundary=" ++ boundary);
+    }
+
+    /// Puts a Worker on NAME.SUBDOMAIN.workers.dev.
+    pub fn enableWorkersDev(self: *Client, a: Allocator, account: []const u8, name: []const u8) !void {
+        const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/scripts/{s}/subdomain", .{ account, name });
+        _ = try self.call(a, std.json.Value, .POST, path, "{\"enabled\":true,\"previews_enabled\":false}");
+    }
+
+    pub fn deleteWorker(self: *Client, a: Allocator, account: []const u8, name: []const u8) !void {
+        const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/scripts/{s}?force=true", .{ account, name });
+        _ = try self.call(a, std.json.Value, .DELETE, path, null);
+    }
+
     pub fn deleteRecord(self: *Client, a: Allocator, zone: []const u8, id: []const u8) !void {
         const path = try std.fmt.allocPrint(a, "/zones/{s}/dns_records/{s}", .{ zone, id });
         _ = try self.call(a, std.json.Value, .DELETE, path, null);
@@ -284,6 +325,8 @@ pub fn certificateCovers(zone: []const u8, host: []const u8) bool {
 
 /// What a name's DNS is like, before or after a sync.
 pub const RecordState = enum {
+    /// A name on workers.dev, served by PocketHarbor's relay: no DNS to write.
+    relay,
     /// Its DNS is elsewhere: the records in `Outcome.records` go there, and
     /// a zone of the account serves it (Cloudflare for SaaS).
     foreign,

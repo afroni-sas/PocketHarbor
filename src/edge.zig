@@ -9,6 +9,7 @@ const crypto = @import("crypto.zig");
 const cloudflare = @import("cloudflare.zig");
 const tunnel = @import("tunnel.zig");
 const store_mod = @import("store.zig");
+const relay = @import("relay.zig");
 const engine = @import("engine.zig");
 const Store = store_mod.Store;
 const Allocator = std.mem.Allocator;
@@ -25,7 +26,148 @@ pub const State = struct {
     origin: []const u8 = "",
     /// The custom hostnames PocketHarbor made, the only ones it removes.
     custom: []const struct { hostname: []const u8, id: []const u8 } = &.{},
+    /// Why the relay could not be deployed, if it could not.
+    relay_error: []const u8 = "",
+    /// The Workers that serve the services' workers.dev names.
+    relay_scripts: []const []const u8 = &.{},
 };
+
+// The relay ------------------------------------------------------------------
+
+/// A hash of the relay's code: a new version of PocketHarbor uploads it again.
+pub fn relayVersion() [16]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(relay.worker_js, &digest, .{});
+    return std.fmt.bytesToHex(digest[0..8].*, .lower);
+}
+
+/// A name on the account's workers.dev subdomain that PocketHarbor serves.
+pub fn isRelayHost(s: store_mod.Settings, host: []const u8) bool {
+    if (s.relay_subdomain.len == 0) return false;
+    var buf: [128]u8 = undefined;
+    const suffix = std.fmt.bufPrint(&buf, ".{s}.workers.dev", .{s.relay_subdomain}) catch return false;
+    return host.len > suffix.len and std.ascii.endsWithIgnoreCase(host, suffix);
+}
+
+/// "web-02f48b.example.workers.dev" -> "web-02f48b", the Worker's name.
+fn relayScript(s: store_mod.Settings, host: []const u8) []const u8 {
+    const dot = std.mem.indexOfScalar(u8, host, '.') orelse host.len;
+    _ = s;
+    return host[0..dot];
+}
+
+const compatibility_date = "2025-06-01";
+
+fn hubMetadata(a: Allocator, secret: []const u8, migrate: bool) ![]const u8 {
+    const Binding = struct { type: []const u8, name: []const u8, class_name: ?[]const u8 = null, text: ?[]const u8 = null };
+    const bindings = [_]Binding{
+        .{ .type = "durable_object_namespace", .name = "RELAY", .class_name = "Relay" },
+        .{ .type = "secret_text", .name = "SECRET", .text = secret },
+        .{ .type = "plain_text", .name = "ROLE", .text = "hub" },
+    };
+    if (migrate) {
+        return std.json.Stringify.valueAlloc(a, .{
+            .main_module = "relay.js",
+            .compatibility_date = compatibility_date,
+            .bindings = bindings,
+            .migrations = .{ .new_tag = "v1", .new_sqlite_classes = [_][]const u8{"Relay"} },
+        }, .{ .emit_null_optional_fields = false });
+    }
+    return std.json.Stringify.valueAlloc(a, .{ .main_module = "relay.js", .compatibility_date = compatibility_date, .bindings = bindings }, .{ .emit_null_optional_fields = false });
+}
+
+fn serviceMetadata(a: Allocator, hub: []const u8) ![]const u8 {
+    return std.json.Stringify.valueAlloc(a, .{
+        .main_module = "relay.js",
+        .compatibility_date = compatibility_date,
+        .bindings = .{
+            .{ .type = "durable_object_namespace", .name = "RELAY", .class_name = "Relay", .script_name = hub },
+            .{ .type = "plain_text", .name = "ROLE", .text = "service" },
+        },
+    }, .{});
+}
+
+/// Deploys the relay's hub, unless this version is already there: the
+/// Worker and Durable Object the phone connects to. The dashboard gets its
+/// address when it has none.
+pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, failure: *Failure) !void {
+    var cf = try client(a, gpa, io, key, store);
+    errdefer failure.message = cf.message;
+    const s = store.settings();
+    const version = relayVersion();
+    if (s.relay_hub.len > 0 and s.relay_url.len > 0 and std.mem.eql(u8, s.relay_version, &version)) return;
+    const id = try store.checkId();
+    const hub = try std.fmt.allocPrint(a, "pocketharbor-{s}", .{id[0..6]});
+    const sub = cf.workersSubdomain(a, s.cloudflare_account) catch try cf.createWorkersSubdomain(a, s.cloudflare_account, hub);
+    var secret: []const u8 = "";
+    if (s.relay_secret.len > 0) secret = crypto.open(a, key, s.relay_secret) catch "";
+    if (secret.len == 0) {
+        const raw = try a.alloc(u8, 48);
+        sys.randomId(raw);
+        secret = raw;
+    }
+    // The Durable Object's class is declared once; later uploads must not
+    // declare it again.
+    cf.uploadWorker(a, s.cloudflare_account, hub, try hubMetadata(a, secret, true), relay.worker_js) catch {
+        try cf.uploadWorker(a, s.cloudflare_account, hub, try hubMetadata(a, secret, false), relay.worker_js);
+    };
+    try cf.enableWorkersDev(a, s.cloudflare_account, hub);
+    const hub_host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ hub, sub });
+    {
+        const lock = try store.lock();
+        defer store.unlock(lock);
+        var next = store.settings();
+        next.relay_url = try std.fmt.allocPrint(a, "wss://{s}/__harbor/connect", .{hub_host});
+        next.relay_secret = try crypto.seal(a, key, secret);
+        next.relay_subdomain = sub;
+        next.relay_hub = hub;
+        next.relay_version = &version;
+        if (next.panel_domain.len == 0) next.panel_domain = hub_host;
+        try store.saveSettings(next);
+    }
+    store.syncRoutes();
+    // The services' Workers run the same code: they follow it.
+    if (s.relay_version.len > 0 and !std.mem.eql(u8, s.relay_version, &version)) {
+        for (load(store).relay_scripts) |name| {
+            cf.uploadWorker(a, s.cloudflare_account, name, try serviceMetadata(a, hub), relay.worker_js) catch {};
+        }
+    }
+}
+
+/// Gives a service an address on workers.dev, served through the relay.
+pub fn generateDomain(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, id: []const u8, failure: *Failure) ![]const u8 {
+    try ensureRelay(a, gpa, io, key, store, failure);
+    var cf = try client(a, gpa, io, key, store);
+    errdefer failure.message = cf.message;
+    const s = store.settings();
+    const svc = try store.load(id);
+    const label = store.publicLabel(svc);
+    const check = try store.checkId();
+    // Worker names stop at 63 characters.
+    const name = try std.fmt.allocPrint(a, "{s}-{s}", .{ label[0..@min(label.len, 50)], check[0..6] });
+    const host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ name, s.relay_subdomain });
+    try cf.uploadWorker(a, s.cloudflare_account, name, try serviceMetadata(a, s.relay_hub), relay.worker_js);
+    try cf.enableWorkersDev(a, s.cloudflare_account, name);
+    {
+        const lock = try store.lock();
+        defer store.unlock(lock);
+        var current = try store.load(id);
+        for (current.domains) |d| if (std.ascii.eqlIgnoreCase(d, host)) return host;
+        var list: std.ArrayList([]const u8) = .empty;
+        try list.appendSlice(a, current.domains);
+        try list.append(a, host);
+        current.domains = list.items;
+        try store.save(current);
+    }
+    store.syncRoutes();
+    var state = load(store);
+    var names: std.ArrayList([]const u8) = .empty;
+    try names.appendSlice(a, state.relay_scripts);
+    try names.append(a, name);
+    state.relay_scripts = names.items;
+    save(store, state);
+    return host;
+}
 
 pub fn load(store: Store) State {
     const data = sys.readFileAlloc(store.a, store.path("cloudflare.json"), 1 << 20) catch return .{};
@@ -182,7 +324,10 @@ pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: St
     }
     const public = try publicHosts(a, store);
     var hosts_list: std.ArrayList([]const u8) = .empty;
-    try hosts_list.appendSlice(a, public);
+    var relay_hosts: std.ArrayList([]const u8) = .empty;
+    for (public) |h| {
+        if (isRelayHost(s, h)) try relay_hosts.append(a, h) else try hosts_list.append(a, h);
+    }
     if (saas) |z| {
         state.origin = try std.fmt.allocPrint(a, "{s}.{s}", .{ cloudflare.origin_label, z.name });
         try hosts_list.append(a, state.origin);
@@ -239,6 +384,23 @@ pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: St
         for (p.remove) |r| cf.deleteRecord(a, z.id, r.id) catch {};
     }
     try syncForeign(a, &cf, saas, state.origin, foreign.items, previous, &state, &outcomes);
+    // The relay: its hub once, then a Worker per workers.dev name in use.
+    if (s.relay_hub.len == 0 or !std.mem.eql(u8, s.relay_version, &relayVersion())) {
+        ensureRelay(a, gpa, io, key, store, failure) catch {
+            state.relay_error = if (failure.message.len > 0) failure.message else "the relay could not be deployed";
+        };
+    }
+    var wanted: std.ArrayList([]const u8) = .empty;
+    for (relay_hosts.items) |h| {
+        try outcomes.append(a, .{ .host = h, .state = .relay });
+        try wanted.append(a, relayScript(s, h));
+    }
+    for (previous.relay_scripts) |name| {
+        var keep = false;
+        for (wanted.items) |w| keep = keep or std.mem.eql(u8, w, name);
+        if (!keep) cf.deleteWorker(a, s.cloudflare_account, name) catch {};
+    }
+    state.relay_scripts = wanted.items;
     state.hosts = outcomes.items;
     save(store, state);
     return state;
@@ -312,6 +474,9 @@ fn syncForeign(
 pub fn disconnect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, eng: *engine.Engine) void {
     if (client(a, gpa, io, key, store)) |c| {
         var cf = c;
+        const s = store.settings();
+        for (load(store).relay_scripts) |name| cf.deleteWorker(a, s.cloudflare_account, name) catch {};
+        if (s.relay_hub.len > 0) cf.deleteWorker(a, s.cloudflare_account, s.relay_hub) catch {};
         const zones = cf.zones(a) catch &.{};
         for (zones) |z| {
             const existing = cf.records(a, z.id) catch continue;
@@ -323,9 +488,16 @@ pub fn disconnect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, sto
     const lock = store.lock() catch return;
     defer store.unlock(lock);
     var s = store.settings();
+    if (isRelayHost(s, s.panel_domain)) s.panel_domain = "";
     s.cloudflare_token = "";
     s.cloudflare_account = "";
+    s.relay_url = "";
+    s.relay_secret = "";
+    s.relay_subdomain = "";
+    s.relay_hub = "";
+    s.relay_version = "";
     store.saveSettings(s) catch {};
+    store.syncRoutes();
     var path = sys.Path.of(store.path("cloudflare.json")) catch return;
     sys.unlink(path.z()) catch {};
 }
