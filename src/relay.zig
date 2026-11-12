@@ -795,8 +795,11 @@ pub const Config = struct { url: []const u8, secret: []const u8, proxy_port: u16
 /// Connects, serves, and connects again, waiting longer after each failure.
 /// `config` is asked again before each attempt, so that a change of relay
 /// or a disconnection is followed; null means there is no relay to use.
-pub fn loop(gpa: Allocator, io: std.Io, ctx: anytype, comptime config: fn (@TypeOf(ctx)) ?Config) noreturn {
+/// After three failures to find the relay's name, `heal` asks Cloudflare
+/// where it is now: the account's workers.dev subdomain may have been renamed.
+pub fn loop(gpa: Allocator, io: std.Io, ctx: anytype, comptime config: fn (@TypeOf(ctx)) ?Config, comptime heal: fn (@TypeOf(ctx)) void) noreturn {
     var backoff_ms: u64 = 1000;
+    var unresolved: u32 = 0;
     while (true) {
         const c = config(ctx) orelse {
             sys.sleepMs(15_000);
@@ -805,6 +808,7 @@ pub fn loop(gpa: Allocator, io: std.Io, ctx: anytype, comptime config: fn (@Type
         if (open(gpa, io, c.url, c.secret, c.proxy_port)) |s| {
             sys.print("relay: connected to {s}\n", .{c.url});
             backoff_ms = 1000;
+            unresolved = 0;
             s.retain();
             if (std.Thread.spawn(.{ .stack_size = 256 * 1024 }, keepalive, .{s})) |th| th.detach() else |_| s.release();
             serve(s) catch |e| sys.eprint("relay: connection lost ({s})\n", .{@errorName(e)});
@@ -820,10 +824,26 @@ pub fn loop(gpa: Allocator, io: std.Io, ctx: anytype, comptime config: fn (@Type
         } else |e| {
             sys.eprint("relay: cannot connect to {s} ({s})\n", .{ c.url, @errorName(e) });
             if (e == error.Forbidden) backoff_ms = 60_000;
+            if (unresolvedName(e)) {
+                unresolved += 1;
+                if (unresolved >= 3) {
+                    unresolved = 0;
+                    heal(ctx);
+                }
+            } else unresolved = 0;
         }
         sys.sleepMs(backoff_ms);
         backoff_ms = @min(backoff_ms * 2, 60_000);
     }
+}
+
+/// Whether the relay's name did not resolve, rather than refusing or failing.
+fn unresolvedName(e: anyerror) bool {
+    const name = @errorName(e);
+    for ([_][]const u8{ "NoAddress", "UnknownHost", "NameServer", "HostLacks" }) |part| {
+        if (std.mem.indexOf(u8, name, part) != null) return true;
+    }
+    return false;
 }
 
 const t = std.testing;

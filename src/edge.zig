@@ -99,18 +99,43 @@ fn serviceMetadata(a: Allocator, hub: []const u8) ![]const u8 {
     }, .{});
 }
 
-/// Deploys the relay's hub, unless this version is already there: the
-/// Worker and Durable Object the phone connects to. The dashboard gets its
-/// address when it has none.
+/// "x.old.workers.dev" -> "x.new.workers.dev"; other names stay as they are.
+pub fn moveHost(a: Allocator, host: []const u8, old: []const u8, new: []const u8) ![]const u8 {
+    if (old.len == 0 or std.mem.eql(u8, old, new)) return host;
+    const suffix = try std.fmt.allocPrint(a, ".{s}.workers.dev", .{old});
+    if (host.len <= suffix.len or !std.ascii.endsWithIgnoreCase(host, suffix)) return host;
+    return std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ host[0 .. host.len - suffix.len], new });
+}
+
+/// Brings the relay in the account in line with what PocketHarbor needs,
+/// whatever happened there: the account's workers.dev subdomain as it is
+/// now (the names move with it when it was renamed), the hub and each
+/// service's Worker present and in this version. Two reads when nothing
+/// changed; it runs on every sync.
 pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, failure: *Failure) !void {
     var cf = try client(a, gpa, io, key, store);
     errdefer failure.message = cf.message;
     const s = store.settings();
+    const account = s.cloudflare_account;
     const version = relayVersion();
-    if (s.relay_hub.len > 0 and s.relay_url.len > 0 and std.mem.eql(u8, s.relay_version, &version)) return;
     const id = try store.checkId();
-    const hub = try std.fmt.allocPrint(a, "pocketharbor-{s}", .{id[0..6]});
-    const sub = cf.workersSubdomain(a, s.cloudflare_account) catch try cf.createWorkersSubdomain(a, s.cloudflare_account, hub);
+    const hub = if (s.relay_hub.len > 0) s.relay_hub else try std.fmt.allocPrint(a, "pocketharbor-{s}", .{id[0..6]});
+    // A subdomain is only made for an account that has none: making one
+    // renames the account's.
+    const sub = cf.workersSubdomain(a, account) catch |e| blk: {
+        if (e != error.CloudflareError or !cloudflare.noSubdomain(cf.message)) return e;
+        break :blk try cf.createWorkersSubdomain(a, account, hub);
+    };
+    const present = try cf.workerNames(a, account);
+    const has = struct {
+        fn f(list: []const []const u8, name: []const u8) bool {
+            for (list) |n| if (std.mem.eql(u8, n, name)) return true;
+            return false;
+        }
+    }.f;
+    const current = std.mem.eql(u8, s.relay_version, &version);
+    const moved = s.relay_subdomain.len > 0 and !std.mem.eql(u8, s.relay_subdomain, sub);
+
     var secret: []const u8 = "";
     if (s.relay_secret.len > 0) secret = crypto.open(a, key, s.relay_secret) catch "";
     if (secret.len == 0) {
@@ -118,12 +143,55 @@ pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, st
         sys.randomId(raw);
         secret = raw;
     }
-    // The Durable Object's class is declared once; later uploads must not
-    // declare it again.
-    cf.uploadWorker(a, s.cloudflare_account, hub, try hubMetadata(a, secret, true), relay.worker_js) catch {
-        try cf.uploadWorker(a, s.cloudflare_account, hub, try hubMetadata(a, secret, false), relay.worker_js);
-    };
-    try cf.enableWorkersDev(a, s.cloudflare_account, hub);
+    if (!has(present, hub) or !current or s.relay_url.len == 0) {
+        // The Durable Object's class is declared once; later uploads must
+        // not declare it again.
+        cf.uploadWorker(a, account, hub, try hubMetadata(a, secret, true), relay.worker_js) catch {
+            try cf.uploadWorker(a, account, hub, try hubMetadata(a, secret, false), relay.worker_js);
+        };
+        try cf.enableWorkersDev(a, account, hub);
+    } else if (moved) {
+        try cf.enableWorkersDev(a, account, hub);
+    }
+
+    // The services' generated names on workers.dev, moved if need be, and
+    // their Workers, put back if they went missing.
+    var scripts: std.ArrayList([]const u8) = .empty;
+    {
+        const lock = try store.lock();
+        defer store.unlock(lock);
+        for (try store.list()) |svc_const| {
+            var svc = svc_const;
+            var changed = false;
+            const domains = try a.alloc([]const u8, svc.domains.len);
+            for (svc.domains, 0..) |d, i| {
+                domains[i] = try moveHost(a, d, s.relay_subdomain, sub);
+                changed = changed or !std.mem.eql(u8, domains[i], d);
+            }
+            const generated = try moveHost(a, svc.generated_domain, s.relay_subdomain, sub);
+            changed = changed or !std.mem.eql(u8, generated, svc.generated_domain);
+            if (changed) {
+                svc.domains = domains;
+                svc.generated_domain = generated;
+                try store.save(svc);
+            }
+            const suffix = try std.fmt.allocPrint(a, ".{s}.workers.dev", .{sub});
+            for (domains) |d| {
+                if (!std.ascii.endsWithIgnoreCase(d, suffix)) continue;
+                const name = d[0..std.mem.indexOfScalar(u8, d, '.').?];
+                if (!std.mem.eql(u8, name, hub)) try scripts.append(a, name);
+            }
+        }
+    }
+    for (scripts.items) |name| {
+        if (!has(present, name) or !current) {
+            cf.uploadWorker(a, account, name, try serviceMetadata(a, hub), relay.worker_js) catch continue;
+            cf.enableWorkersDev(a, account, name) catch {};
+        } else if (moved) {
+            cf.enableWorkersDev(a, account, name) catch {};
+        }
+    }
+
     const hub_host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ hub, sub });
     {
         const lock = try store.lock();
@@ -134,17 +202,14 @@ pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, st
         next.relay_subdomain = sub;
         next.relay_hub = hub;
         next.relay_version = &version;
+        next.panel_domain = try moveHost(a, next.panel_domain, s.relay_subdomain, sub);
         if (next.panel_domain.len == 0) next.panel_domain = hub_host;
         try store.saveSettings(next);
     }
     store.syncRoutes();
-    // The services' Workers run the same code: they follow it.
-    if (s.relay_version.len > 0 and !std.mem.eql(u8, s.relay_version, &version)) {
-        for (load(store).relay_scripts) |name| {
-            if (std.mem.eql(u8, name, hub)) continue;
-            cf.uploadWorker(a, s.cloudflare_account, name, try serviceMetadata(a, hub), relay.worker_js) catch {};
-        }
-    }
+    var state = load(store);
+    state.relay_scripts = scripts.items;
+    save(store, state);
 }
 
 /// "ph-" and ten hexadecimal digits: what a service's generated name and
@@ -347,8 +412,15 @@ fn noteError(store: Store, message: []const u8) void {
 /// that are gone are removed.
 pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, failure: *Failure) !State {
     var cf = try client(a, gpa, io, key, store);
+    // The relay first, as it is in the account now (a renamed subdomain,
+    // Workers removed by hand, a new version): the names below follow it.
+    var relay_error: []const u8 = "";
+    ensureRelay(a, gpa, io, key, store, failure) catch {
+        relay_error = if (failure.message.len > 0) failure.message else "the relay could not be deployed";
+        failure.message = "";
+    };
     const s = store.settings();
-    var state: State = .{ .synced_at = @intCast(@divFloor(sys.nowNs(), std.time.ns_per_s)), .account = s.cloudflare_account };
+    var state: State = .{ .synced_at = @intCast(@divFloor(sys.nowNs(), std.time.ns_per_s)), .account = s.cloudflare_account, .relay_error = relay_error };
     errdefer {
         failure.message = cf.message;
         state.@"error" = cf.message;
@@ -427,12 +499,6 @@ pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: St
         for (p.remove) |r| cf.deleteRecord(a, z.id, r.id) catch {};
     }
     try syncForeign(a, &cf, saas, state.origin, foreign.items, previous, &state, &outcomes);
-    // The relay: its hub once, then a Worker per workers.dev name in use.
-    if (s.relay_hub.len == 0 or !std.mem.eql(u8, s.relay_version, &relayVersion())) {
-        ensureRelay(a, gpa, io, key, store, failure) catch {
-            state.relay_error = if (failure.message.len > 0) failure.message else "the relay could not be deployed";
-        };
-    }
     for (relay_hosts.items) |h| try outcomes.append(a, .{ .host = h, .state = .relay });
     const hub = store.settings().relay_hub;
     const wanted = try serviceScripts(a, hub, relay_hosts.items);
@@ -557,4 +623,14 @@ test "the hub is never one of the services' Workers" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expectEqualStrings("shop-web-02f48b", got[0]);
     try std.testing.expectEqualStrings("api-02f48b", got[1]);
+}
+
+test "names move with a renamed workers.dev subdomain" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("ph-43ae70081f.pharbor.workers.dev", try moveHost(a, "ph-43ae70081f.abdou-11d.workers.dev", "abdou-11d", "pharbor"));
+    try std.testing.expectEqualStrings("app.snacki.africa", try moveHost(a, "app.snacki.africa", "abdou-11d", "pharbor"));
+    try std.testing.expectEqualStrings("x.other.workers.dev", try moveHost(a, "x.other.workers.dev", "abdou-11d", "pharbor"));
+    try std.testing.expectEqualStrings("", try moveHost(a, "", "abdou-11d", "pharbor"));
 }
