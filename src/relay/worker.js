@@ -13,6 +13,10 @@ export const RES_HEAD = 4 // phone to relay: JSON {status, headers}
 export const RES_BODY = 5 // phone to relay: a piece of the response body
 export const RES_END = 6 // phone to relay: the response is complete
 export const ABORT = 7 // phone to relay: the request failed; data is the reason
+export const WS_OPEN = 8 // relay to phone: a visitor asks for a WebSocket; JSON like HEAD
+export const WS_TEXT = 9 // both ways: a text message of an open WebSocket
+export const WS_BINARY = 10 // both ways: a binary message
+export const WS_CLOSE = 11 // both ways: two bytes of code, then the reason
 
 const CHUNK = 256 * 1024
 const TIMEOUT_MS = 100_000
@@ -35,11 +39,15 @@ export function parse(data) {
 
 const noBody = new Set([101, 204, 205, 304])
 
-/** The relay's state for one phone: its socket and the requests in flight. */
+/** The relay's state for one phone: its socket and the requests in flight.
+ * `accept(id, protocol, request)` answers a visitor's upgrade that the phone
+ * agreed to, keeping the visitor's socket, and `visitor(id)` finds it
+ * again; the Durable Object keeps those sockets across its hibernation. */
 export class RelayCore {
-  constructor(socket) {
+  constructor(socket, accept, visitor) {
     this.socket = socket
-    this.next = 1
+    this.accept = accept
+    this.visitor = visitor
     this.pending = new Map()
   }
 
@@ -47,11 +55,9 @@ export class RelayCore {
   async handle(request, host) {
     const ws = this.socket()
     if (!ws) return new Response('This service is offline: the phone it runs on is not connected.', { status: 502, headers: { 'content-type': 'text/plain; charset=utf-8' } })
-    if ((request.headers.get('upgrade') || '').toLowerCase() === 'websocket') {
-      return new Response('WebSockets do not go through the relay yet.', { status: 501 })
-    }
-    const id = this.next
-    this.next = this.next >= 0xffffffff ? 1 : this.next + 1
+    const upgrade = (request.headers.get('upgrade') || '').toLowerCase() === 'websocket'
+    if (upgrade && !this.accept) return new Response('WebSockets need the Durable Object.', { status: 501 })
+    const id = this.newId()
     const url = new URL(request.url)
     const body = request.body ? new Uint8Array(await request.arrayBuffer()) : null
     const headers = []
@@ -66,9 +72,13 @@ export class RelayCore {
     }
     const response = new Promise((resolve) => {
       const timer = setTimeout(() => this.finish(id, new Response('The phone did not answer in time.', { status: 504 })), TIMEOUT_MS)
-      this.pending.set(id, { resolve, writer: null, timer, head: request.method === 'HEAD' })
+      this.pending.set(id, { resolve, writer: null, timer, head: request.method === 'HEAD', upgrade, request })
     })
     try {
+      if (upgrade) {
+        ws.send(frame(WS_OPEN, id, JSON.stringify(head)))
+        return response
+      }
       ws.send(frame(HEAD, id, JSON.stringify(head)))
       for (let at = 0; body && at < body.length; at += CHUNK) ws.send(frame(BODY, id, body.subarray(at, at + CHUNK)))
       ws.send(frame(END, id))
@@ -76,6 +86,17 @@ export class RelayCore {
       this.finish(id, new Response('The connection to the phone broke.', { status: 502 }))
     }
     return response
+  }
+
+  /** A request id that nothing uses: counting would start again at 1 after
+   * the Durable Object hibernates, while visitors' WebSockets stay open. */
+  newId() {
+    const one = new Uint32Array(1)
+    for (;;) {
+      crypto.getRandomValues(one)
+      const id = one[0]
+      if (id !== 0 && !this.pending.has(id) && !(this.visitor && this.visitor(id))) return id
+    }
   }
 
   /** Resolves a request that has no response yet, and forgets it. */
@@ -92,10 +113,19 @@ export class RelayCore {
   message(data) {
     if (typeof data === 'string') return
     const f = parse(data)
+    if (f.type === WS_TEXT || f.type === WS_BINARY || f.type === WS_CLOSE) return this.fromService(f)
     const p = this.pending.get(f.id)
     if (!p) return
     if (f.type === RES_HEAD) {
       const head = JSON.parse(decoder.decode(f.data))
+      if (p.upgrade && head.status === 101) {
+        // The service took the WebSocket: the visitor gets the other end.
+        clearTimeout(p.timer)
+        this.pending.delete(f.id)
+        const protocol = (head.headers.find(([name]) => name.toLowerCase() === 'sec-websocket-protocol') || [])[1]
+        p.resolve(this.accept(f.id, protocol, p.request))
+        return
+      }
       if (noBody.has(head.status) || p.head) {
         clearTimeout(p.timer)
         p.resolve(new Response(null, { status: head.status, headers: head.headers }))
@@ -117,6 +147,46 @@ export class RelayCore {
     }
   }
 
+  /** A message or a close from the service, for its visitor. */
+  fromService(f) {
+    const ws = this.visitor(f.id)
+    if (!ws) return
+    try {
+      if (f.type === WS_TEXT) ws.send(decoder.decode(f.data))
+      else if (f.type === WS_BINARY) ws.send(f.data.slice())
+      else {
+        const code = f.data.length >= 2 ? (f.data[0] << 8) | f.data[1] : 1000
+        ws.close(code === 1005 || code === 1006 ? 1000 : code, decoder.decode(f.data.subarray(2)))
+      }
+    } catch {
+      // The visitor is already gone.
+    }
+  }
+
+  /** A message from a visitor's WebSocket, for the service on the phone. */
+  fromVisitor(id, data) {
+    const ws = this.socket()
+    if (!ws) return false
+    ws.send(typeof data === 'string' ? frame(WS_TEXT, id, data) : frame(WS_BINARY, id, data))
+    return true
+  }
+
+  /** A visitor closed its WebSocket. */
+  visitorClosed(id, code, reason) {
+    const ws = this.socket()
+    if (!ws) return
+    const why = encoder.encode(reason || '')
+    const data = new Uint8Array(2 + why.length)
+    data[0] = (code >> 8) & 0xff
+    data[1] = code & 0xff
+    data.set(why, 2)
+    try {
+      ws.send(frame(WS_CLOSE, id, data))
+    } catch {
+      // The phone is gone too.
+    }
+  }
+
   /** The phone went away: everything in flight fails. */
   closed() {
     for (const id of [...this.pending.keys()]) this.finish(id, new Response('The connection to the phone broke.', { status: 502 }))
@@ -127,7 +197,15 @@ export class RelayCore {
 export class Relay {
   constructor(state) {
     this.state = state
-    this.core = new RelayCore(() => this.state.getWebSockets('phone')[0])
+    this.core = new RelayCore(
+      () => this.state.getWebSockets('phone')[0],
+      (id, protocol) => {
+        const pair = new WebSocketPair()
+        this.state.acceptWebSocket(pair[1], [`v:${id}`])
+        return new Response(null, { status: 101, webSocket: pair[0], headers: protocol ? { 'sec-websocket-protocol': protocol } : {} })
+      },
+      (id) => this.state.getWebSockets(`v:${id}`)[0],
+    )
     // Keepalives are answered without waking the object.
     this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
   }
@@ -142,16 +220,28 @@ export class Relay {
     return this.core.handle(request, request.headers.get('x-harbor-host'))
   }
 
+  /** The visitor's id, for a visitor's socket; null for the phone's. */
+  visitorId(ws) {
+    const tag = this.state.getTags(ws).find((t) => t.startsWith('v:'))
+    return tag ? Number(tag.slice(2)) : null
+  }
+
   webSocketMessage(ws, data) {
-    this.core.message(data)
+    const id = this.visitorId(ws)
+    if (id === null) return this.core.message(data)
+    if (!this.core.fromVisitor(id, data)) ws.close(1012, 'The phone is not connected.')
   }
 
-  webSocketClose() {
+  webSocketClose(ws, code, reason) {
+    const id = this.visitorId(ws)
+    if (id !== null) return this.core.visitorClosed(id, code, reason)
     this.core.closed()
+    // Without the phone, its visitors' WebSockets lead nowhere.
+    for (const v of this.state.getWebSockets()) if (this.visitorId(v) !== null) v.close(1012, 'The phone went away.')
   }
 
-  webSocketError() {
-    this.core.closed()
+  webSocketError(ws) {
+    this.webSocketClose(ws, 1011, 'error')
   }
 }
 

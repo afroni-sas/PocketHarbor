@@ -543,7 +543,8 @@ async function generateRelayDomain(svc, update, port) {
 function GenerateForm({ svc, update, info, quickTunnel }) {
   const v = draft.value
   const zones = info.zones || []
-  if (info.relay_ready) {
+  if (info.relay_ready || info.generates_in) {
+    const where = info.generates_in ? `A name in ${info.generates_in}, through the tunnel: no request limit` : 'Choose your target port'
     return (
       <form
         class="net-form"
@@ -555,7 +556,7 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
         <b>Generate Service Domain</b>
         <label for="gen-port">Enter the port your app is listening on</label>
         <input class="input" id="gen-port" type="number" min="1" max="65535" placeholder={String(svc.port || 8080)} value={v.port} autofocus onInput={(e) => (draft.value = { ...draft.peek(), port: e.currentTarget.value, error: '' })} />
-        <Foot hint={v.error || 'Choose your target port'} error={!!v.error}>
+        <Foot hint={v.error || where} error={!!v.error}>
           <button type="button" class="btn sm" onClick={() => (form.value = '')}>
             Cancel
           </button>

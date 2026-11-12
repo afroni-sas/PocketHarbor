@@ -147,8 +147,29 @@ pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, st
     }
 }
 
-/// Gives a service an address on workers.dev, served through the relay.
+/// Gives a service a public name: in the zone chosen for generated names,
+/// through the tunnel and with no request limit; otherwise on workers.dev,
+/// through the relay.
 pub fn generateDomain(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, id: []const u8, failure: *Failure) ![]const u8 {
+    const settings = store.settings();
+    if (settings.generated_zone.len > 0) {
+        const svc = try store.load(id);
+        const label = store.publicLabel(svc);
+        const check = try store.checkId();
+        // One level below the zone: Cloudflare's free certificate covers it.
+        const host = try std.fmt.allocPrint(a, "{s}-{s}.{s}", .{ label[0..@min(label.len, 50)], check[0..6], settings.generated_zone });
+        const lock = try store.lock();
+        defer store.unlock(lock);
+        var current = try store.load(id);
+        for (current.domains) |d| if (std.ascii.eqlIgnoreCase(d, host)) return host;
+        var list: std.ArrayList([]const u8) = .empty;
+        try list.appendSlice(a, current.domains);
+        try list.append(a, host);
+        current.domains = list.items;
+        try store.save(current);
+        store.syncRoutes();
+        return host;
+    }
     try ensureRelay(a, gpa, io, key, store, failure);
     var cf = try client(a, gpa, io, key, store);
     errdefer failure.message = cf.message;

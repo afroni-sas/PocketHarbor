@@ -516,6 +516,7 @@ fn domainsView(c: *Ctx, svc: Service) !void {
     return c.res.json(200, .{
         .managed = managed,
         .relay_ready = managed and s.relay_url.len > 0,
+        .generates_in = if (managed) s.generated_zone else "",
         .relay_error = state.relay_error,
         .saas_zone = s.cloudflare_saas_zone,
         .synced_at = state.synced_at,
@@ -641,6 +642,7 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             .create_url = create_url,
             .connector = if (edge.connected(c.store)) connectorState(c) else "",
             .saas_zone = s.cloudflare_saas_zone,
+            .generated_zone = s.generated_zone,
             .relay = .{
                 .ready = s.relay_url.len > 0,
                 .dashboard = if (edge.isRelayHost(s, s.panel_domain)) s.panel_domain else "",
@@ -663,17 +665,21 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
     }
     if (seg.len == 0 and method(c, "PATCH")) {
         if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");
-        const body = c.req.json(struct { saas_zone: []const u8 }) catch return c.res.fail(400, "send saas_zone");
-        if (body.saas_zone.len > 0) {
+        const body = c.req.json(struct { saas_zone: ?[]const u8 = null, generated_zone: ?[]const u8 = null }) catch return c.res.fail(400, "send saas_zone or generated_zone");
+        const zones = edge.load(c.store).zones;
+        for ([_]?[]const u8{ body.saas_zone, body.generated_zone }) |maybe| {
+            const z = maybe orelse continue;
+            if (z.len == 0) continue;
             var known = false;
-            for (edge.load(c.store).zones) |z| known = known or eql(z, body.saas_zone);
+            for (zones) |name| known = known or eql(name, z);
             if (!known) return c.res.fail(400, "that is not one of the account's zones");
         }
         {
             const lock = try c.store.lock();
             defer c.store.unlock(lock);
             var s = c.store.settings();
-            s.cloudflare_saas_zone = body.saas_zone;
+            if (body.saas_zone) |z| s.cloudflare_saas_zone = z;
+            if (body.generated_zone) |z| s.generated_zone = z;
             try c.store.saveSettings(s);
         }
         const state = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch |e|
