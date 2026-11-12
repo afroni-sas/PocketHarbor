@@ -1128,7 +1128,7 @@ export function ServicePanel() {
     )
   }
   const tabs = [
-    dbKind(svc) && ['data', 'Data'],
+    dbKind(svc) && ['data', 'Database'],
     ['deployments', 'Deployments'],
     ['variables', 'Variables'],
     ['metrics', 'Metrics'],
