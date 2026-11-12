@@ -617,23 +617,33 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             .origin = try tunnel_mod.originUrl(c.store),
             .permissions = cloudflare.token_permissions,
             .create_url = create_url,
+            .connector = if (edge.connected(c.store)) connectorState(c) else "",
             .state = state,
         });
     }
     var failure: edge.Failure = .{ .err = error.None, .message = "" };
     if (seg.len == 0 and method(c, "PUT")) {
-        const body = c.req.json(struct { token: []const u8 }) catch return c.res.fail(400, "send token");
+        const body = c.req.json(struct { token: []const u8, account: []const u8 = "" }) catch return c.res.fail(400, "send token");
         const token = std.mem.trim(u8, body.token, " \r\n\t");
+        const account = std.mem.trim(u8, body.account, " \r\n\t");
         if (token.len < 20) return c.res.fail(400, "that is not a Cloudflare API token");
-        const state = edge.connect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng, token, &failure) catch |e|
+        if (account.len > 0 and !cloudflare.validAccount(account)) return c.res.fail(400, "an Account ID is 32 hexadecimal characters");
+        const state = edge.connect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng, token, account, &failure) catch |e|
             return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
-        return c.res.json(200, .{ .connected = true, .state = state });
+        startConnector(c);
+        return c.res.json(200, .{ .connected = true, .connector = "starting", .state = state });
+    }
+    if (seg.len == 1 and eql(seg[0], "start") and method(c, "POST")) {
+        if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");
+        startConnector(c);
+        return c.res.json(200, .{ .connector = "starting" });
     }
     if (seg.len == 1 and eql(seg[0], "sync") and method(c, "POST")) {
         if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");
         const state = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch |e|
             return c.res.fail(502, if (failure.message.len > 0) failure.message else @errorName(e));
-        return c.res.json(200, .{ .connected = true, .state = state });
+        if (eql(connectorState(c), "stopped")) startConnector(c);
+        return c.res.json(200, .{ .connected = true, .connector = connectorState(c), .state = state });
     }
     if (seg.len == 0 and method(c, "DELETE")) {
         edge.disconnect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng);
@@ -835,6 +845,11 @@ fn startDeployFrom(c: *Ctx, id: []const u8, trigger: []const u8, from: ?u32) voi
     const trig_z = c.a.dupeSentinel(u8, trigger, 0) catch return;
     const from_z = if (from) |n| std.fmt.allocPrintSentinel(c.a, "{d}", .{n}, 0) catch return else null;
     const argv = [_:null]?[*:0]const u8{ "pharbor", "_deploy", id_z.ptr, trig_z.ptr, if (from_z) |f| f.ptr else null };
+    startDetached(c, &argv);
+}
+
+/// Runs `pharbor ARGS...` on its own: it outlives this request and the panel.
+fn startDetached(c: *Ctx, argv: [*:null]const ?[*:0]const u8) void {
     const pid = sys.fork() catch return;
     if (pid == 0) {
         _ = linux.setsid();
@@ -843,11 +858,24 @@ fn startDeployFrom(c: *Ctx, id: []const u8, trigger: []const u8, from: ?u32) voi
         _ = linux.dup2(null_fd, 0);
         _ = linux.dup2(null_fd, 1);
         _ = linux.dup2(null_fd, 2);
-        _ = linux.execve("/proc/self/exe", &argv, c.panel.envp);
+        _ = linux.execve("/proc/self/exe", argv, c.panel.envp);
         linux.exit_group(127);
     }
     var status: i32 = 0;
     _ = linux.waitpid(pid, &status, 0);
+}
+
+/// cloudflared starts in its own process: its first start downloads it.
+fn startConnector(c: *Ctx) void {
+    if (edge.connectorStarting(c.store)) return;
+    const argv = [_:null]?[*:0]const u8{ "pharbor", "_connector" };
+    startDetached(c, &argv);
+}
+
+fn connectorState(c: *Ctx) []const u8 {
+    if (tunnel_mod.running(&c.eng)) return "running";
+    if (edge.connectorStarting(c.store)) return "starting";
+    return "stopped";
 }
 
 fn services(c: *Ctx, seg: []const []const u8) !void {
@@ -1344,6 +1372,8 @@ fn tunnelApi(c: *Ctx, seg: []const []const u8) !void {
         });
     }
     if (seg.len == 1 and eql(seg[0], "quick") and method(c, "POST")) {
+        // Both run in the same container: a quick tunnel would stop this one.
+        if (edge.connected(c.store)) return c.res.fail(409, "Cloudflare is connected: add a domain in one of your zones instead of a temporary address");
         const body = c.req.json(struct { service: []const u8 }) catch return c.res.fail(400, "send service");
         if (!c.store.exists(body.service)) return c.res.fail(404, "no such service");
         const svc = try c.store.load(body.service);

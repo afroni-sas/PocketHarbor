@@ -67,15 +67,22 @@ fn tunnelId(a: std.mem.Allocator, token: []const u8) ?[]const u8 {
     return doc.t;
 }
 
-/// A permanent tunnel created in the Cloudflare dashboard. Its token goes
-/// through the environment so that it never shows in a process listing.
+/// Where cloudflared finds the token, inside its container.
+const token_dir = "/etc/pharbor-tunnel";
+
+/// A permanent tunnel. Its token goes in a file only this user can read,
+/// which the container gets read-only: on a command line or in the
+/// container's environment, any process listing would show it.
 pub fn named(store: Store, eng: *Engine, token: []const u8) !void {
     const a = store.a;
     eng.remove(container);
-    const env = try std.fmt.allocPrint(a, "TUNNEL_TOKEN={s}", .{token});
+    const dir = store.path("tunnel");
+    try sys.mkdirP(dir, 0o700);
+    try sys.writeFileAtomic(store.path("tunnel/token"), token, 0o600);
+    const mount = try std.fmt.allocPrint(a, "{s}:{s}:ro", .{ dir, token_dir });
     const args = [_][]const u8{
-        "run",  "-d",     "--name", container, "--restart", "always", "--host-gateway",
-        "-e",   env,      image,    "tunnel",  "run",
+        "run",  "-d",    "--name", container, "--restart", "always", "--host-gateway",
+        "-v",   mount,   image,    "tunnel",  "run",       "--token-file", token_dir ++ "/token",
     };
     if (try eng.run(&args) != 0) return error.TunnelFailed;
 
@@ -101,8 +108,16 @@ pub fn named(store: Store, eng: *Engine, token: []const u8) !void {
     }
 }
 
+/// Whether the tunnel's container runs.
+pub fn running(eng: *Engine) bool {
+    const info = eng.inspect(container) orelse return false;
+    return info.alive();
+}
+
 pub fn stop(store: Store, eng: *Engine) void {
     eng.remove(container);
+    var token = sys.Path.of(store.path("tunnel/token")) catch null;
+    if (token) |*p| sys.unlink(p.z()) catch {};
     var s = store.settings();
     if (s.default_service.len > 0 or s.tunnel_id.len > 0) {
         s.default_service = "";

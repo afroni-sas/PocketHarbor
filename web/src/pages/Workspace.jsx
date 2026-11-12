@@ -157,11 +157,12 @@ async function connectCloudflare(e) {
   e.preventDefault()
   const form = e.currentTarget
   const token = form.elements.token.value.trim()
+  const account = form.elements.account.value.trim()
   starting.value = true
   try {
-    await put('/cloudflare', { token })
+    await put('/cloudflare', { token, account })
     form.reset()
-    toast('Cloudflare connected', 'success')
+    toast('Cloudflare connected; the tunnel is starting', 'success')
     await load('networking')
   } catch (err) {
     toast(err.message, 'error')
@@ -198,6 +199,48 @@ function disconnectCloudflare() {
 
 const recordWords = { ready: 'Ready', conflict: 'Left alone', no_zone: 'No zone', failed: 'Failed' }
 
+// While cloudflared starts, the card asks again every few seconds.
+let connectorTimer = 0
+function watchConnector(state) {
+  clearTimeout(connectorTimer)
+  if (state === 'starting') connectorTimer = setTimeout(() => route.peek().query.tab === 'networking' && load('networking'), 3000)
+}
+
+async function startConnector() {
+  try {
+    await post('/cloudflare/start')
+    await load('networking')
+  } catch (err) {
+    toast(err.message, 'error')
+  }
+}
+
+function ConnectorLine({ state }) {
+  watchConnector(state)
+  if (state === 'running') {
+    return (
+      <div class="cf-connector green">
+        <span class="dot green" /> The tunnel is connected to Cloudflare.
+      </div>
+    )
+  }
+  if (state === 'starting') {
+    return (
+      <div class="cf-connector">
+        <span class="spinner" style="width:12px;height:12px" /> Starting the tunnel. The first time, cloudflared is downloaded to the phone: a minute or two.
+      </div>
+    )
+  }
+  return (
+    <div class="cf-connector yellow">
+      <span class="dot yellow" /> The tunnel is not running: domains do not answer from the internet.
+      <button class="btn sm" onClick={startConnector}>
+        Start it
+      </button>
+    </div>
+  )
+}
+
 function CloudflareCard() {
   const cf = data.value.cloudflare
   if (!cf) return null
@@ -221,6 +264,7 @@ function CloudflareCard() {
               Disconnect
             </button>
           </div>
+          <ConnectorLine state={cf.connector} />
           {st.error && <div class="banner warn">{st.error}</div>}
           <p class="muted small" style="margin:8px 0 0">
             {st.zones && st.zones.length
@@ -256,10 +300,13 @@ function CloudflareCard() {
             <li>
               Give it these permissions: <span class="mono">{cf.permissions}</span>.
             </li>
-            <li>Paste the token here. It is stored encrypted on this phone.</li>
+            <li>
+              Paste the token here, and for a token your account owns (it starts with <span class="mono">cfat_</span>), the Account ID shown with it or on the dashboard's Overview page. The token is stored encrypted on this phone.
+            </li>
           </ol>
-          <form class="row" onSubmit={connectCloudflare}>
-            <input class="input mono" name="token" type="password" placeholder="Cloudflare API token" required autocomplete="off" style="flex:1" />
+          <form class="cf-connect" onSubmit={connectCloudflare}>
+            <input class="input mono" name="token" type="password" placeholder="Cloudflare API token" required autocomplete="off" aria-label="Cloudflare API token" />
+            <input class="input mono" name="account" placeholder="Account ID (for cfat_ tokens)" autocomplete="off" spellcheck={false} pattern="[0-9a-fA-F]{32}" title="32 hexadecimal characters" aria-label="Cloudflare Account ID" />
             <button class="btn primary" disabled={busy}>
               {busy && <span class="spinner" style="width:13px;height:13px" />}
               Connect
@@ -279,6 +326,8 @@ function Networking() {
   return (
     <>
       <CloudflareCard />
+      {!managed && (
+        <>
       <section class="card card-pad set-card">
         <h3>Cloudflare tunnel</h3>
         {tunnel.running ? (
@@ -325,6 +374,8 @@ function Networking() {
           </button>
         </form>
       </section>
+        </>
+      )}
       {!managed && (
       <section class="card card-pad set-card">
         <h3>Tunnel token</h3>
