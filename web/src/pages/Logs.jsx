@@ -7,6 +7,7 @@ import { enc, get, post } from '../api.js'
 import { me, toast } from '../state.js'
 import { page, setQuery } from '../project.js'
 import { attempt, GithubIcon, openMenu, ServiceIcon, Spinner, timeAgo } from '../ui.jsx'
+import { LevelText, levelOf } from '../loglevel.jsx'
 
 const data = signal({ key: '', text: null, rows: null })
 const record = signal({ key: '', deployment: null, variables: null })
@@ -120,7 +121,6 @@ function Highlight({ text, q }) {
   return out
 }
 
-const levelOf = (line) => (/\b(error|fatal|panic|exception|failed)\b/i.test(line) ? ' err' : /\bwarn(ing)?\b/i.test(line) ? ' warn' : '')
 
 /** Railway's empty and loading state: a sketch of a log, and a sentence. */
 function Waiting({ title, text }) {
@@ -155,11 +155,14 @@ function TextLogs({ text, q, tab }) {
     <>
       <pre class="logs" ref={(e) => (el = e)} onScroll={onScroll}>
         {shown.length === 0 && <span class="muted">No line matches.</span>}
-        {shown.map((l, i) => (
-          <div key={i} class={`line${levelOf(l)}`}>
-            <Highlight text={l} q={q} />
-          </div>
-        ))}
+        {shown.map((l, i) => {
+          const info = levelOf(l)
+          return (
+            <div key={i} class={`line${info.level === 'error' ? ' err' : ''}`}>
+              <LevelText text={l} info={info} mark={(t, k) => <Highlight key={k} text={t} q={q} />} />
+            </div>
+          )
+        })}
       </pre>
       <footer class="logs-foot">{q ? `${shown.length} of ${lines.length} lines` : `${lines.length} lines`}</footer>
     </>

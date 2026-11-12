@@ -9,6 +9,7 @@ import { me, services } from '../state.js'
 import { openService, page } from '../project.js'
 import { openMenu, Spinner } from '../ui.jsx'
 import { RangePicker } from './Chart.jsx'
+import { LevelText, levelOf } from '../loglevel.jsx'
 
 const query = signal('')
 /** What the server was asked: the search box, after a pause in typing. */
@@ -91,11 +92,6 @@ function Highlight({ text, q }) {
 }
 
 /** Errors: what went to stderr, or says it failed. */
-function severity(l) {
-  if (l.stream === 'stderr' || /\b(error|fatal|panic|exception|failed)\b/i.test(l.text)) return 'err'
-  if (/\bwarn(ing)?\b/i.test(l.text)) return 'warn'
-  return ''
-}
 
 const stamp = (ms) => {
   const d = new Date(ms)
@@ -113,7 +109,7 @@ function Histogram({ lines, from, to }) {
   for (const l of lines) {
     const i = Math.min(n - 1, Math.max(0, Math.floor((l.t - from) / width)))
     all[i]++
-    if (severity(l) === 'err') bad[i]++
+    if (levelOf(l.text).level === 'error') bad[i]++
   }
   const top = Math.max(1, ...all)
   return (
@@ -201,18 +197,21 @@ export function ProjectLogs() {
           >
             {cut && <div class="range-start">You reached the start of the range · {stamp(from)}</div>}
             {lines.length === 0 && <div class="empty small">{q ? `No line matches “${q}” in this range.` : 'Nothing logged in this range.'}</div>}
-            {lines.map((l, i) => (
-              <div key={i} class={`log-line ${severity(l)}`}>
-                <span class="sev" />
-                <span class="time">{stamp(l.t)}</span>
-                <button class="svc-name" onClick={() => openService(l.service, { tab: undefined })} title={`Open ${l.service}`}>
-                  {l.service}
-                </button>
-                <span class="text">
-                  <Highlight text={l.text} q={q} />
-                </span>
-              </div>
-            ))}
+            {lines.map((l, i) => {
+              const info = levelOf(l.text)
+              return (
+                <div key={i} class={`log-line${info.level === 'error' ? ' err' : ''}`}>
+                  <span class="sev" />
+                  <span class="time">{stamp(l.t)}</span>
+                  <button class="svc-name" onClick={() => openService(l.service, { tab: undefined })} title={`Open ${l.service}`}>
+                    {l.service}
+                  </button>
+                  <span class="text">
+                    <LevelText text={l.text} info={info} mark={(t, k) => <Highlight key={k} text={t} q={q} />} />
+                  </span>
+                </div>
+              )
+            })}
           </div>
           <div class="scroll-buttons">
             <button class="btn icon sm" aria-label="To the oldest line" onClick={() => el && (el.scrollTop = 0)}>

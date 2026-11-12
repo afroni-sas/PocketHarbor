@@ -11,6 +11,8 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - '.github/release-notes.md'
+      - '.github/changes/**'
+      - 'skills/**'
       - 'install.sh'
       - 'uninstall.sh'
   workflow_dispatch:
@@ -81,7 +83,10 @@ jobs:
             cp "zig-out/android/$abi/pharbor" "dist/pharbor-android-$abi"
           done
           cp install.sh uninstall.sh dist/
-          (cd dist && sha256sum pharbor-android-* install.sh uninstall.sh > SHA256SUMS)
+          # The skill for AI agents, with its API reference copied in.
+          tar -chzf dist/pocketharbor-skill.tar.gz -C skills pocketharbor
+          tar -tzf dist/pocketharbor-skill.tar.gz
+          (cd dist && sha256sum pharbor-android-* install.sh uninstall.sh pocketharbor-skill.tar.gz > SHA256SUMS)
           cat dist/SHA256SUMS
 
       # The static binaries run on any Linux, so the runner installs the
@@ -136,7 +141,11 @@ jobs:
 
       - name: Write the release notes
         if: github.ref_type == 'tag'
-        run: envsubst '$GITHUB_SHA $GITHUB_SERVER_URL $GITHUB_REPOSITORY $GITHUB_RUN_ID $GITHUB_REF_NAME' < .github/release-notes.md > notes.md
+        run: |
+          # What changed in this version, when written, then how to install it.
+          changes=".github/changes/$GITHUB_REF_NAME.md"
+          { if [ -f "$changes" ]; then cat "$changes"; echo; fi
+            envsubst '$GITHUB_SHA $GITHUB_SERVER_URL $GITHUB_REPOSITORY $GITHUB_RUN_ID $GITHUB_REF_NAME' < .github/release-notes.md; } > notes.md
 
       - name: Publish the release
         if: github.ref_type == 'tag'

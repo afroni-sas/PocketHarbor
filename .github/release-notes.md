@@ -36,8 +36,19 @@ It stops PocketHarbor and its services and removes the programs, the start at bo
 | Phones and tablets (64-bit ARM) | `pharbor-android-arm64-v8a` |
 | Emulators, x86 devices and Linux PCs | `pharbor-android-x86_64` |
 | Everything | `install.sh`, `uninstall.sh` |
+| AI agents | `pocketharbor-skill.tar.gz`: the skill and the API reference |
 
 The binaries are static: they also run on any 64-bit Linux.
+
+## For AI agents
+
+The skill teaches an agent (Claude Code and others that read `SKILL.md`) to drive PocketHarbor through its API:
+
+```bash
+mkdir -p ~/.claude/skills && curl -fsSL ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/pocketharbor-skill.tar.gz | tar -xz -C ~/.claude/skills
+```
+
+Then give it `PHARBOR_URL` and an API token (`PHARBOR_TOKEN`, from Account › API tokens).
 
 ## Verify
 

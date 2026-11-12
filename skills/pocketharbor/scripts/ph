@@ -1,0 +1,71 @@
+#!/bin/sh
+# ph: a small client for the PocketHarbor API.
+#
+#   ph METHOD PATH [JSON]      e.g. ph GET /services
+#                                   ph PATCH /services/shop.production.api '{"port":8080}'
+#   ph wait SERVICE_ID         waits for its newest deployment to finish,
+#                              prints its status, and its log if it failed
+#
+# Needs PHARBOR_URL (the dashboard's address, e.g. http://192.168.1.20:8080)
+# and PHARBOR_TOKEN (an API token, ph_...). Prints the response body; exits
+# non-zero on an HTTP error, with the error on stderr.
+
+set -eu
+
+: "${PHARBOR_URL:?set PHARBOR_URL to the dashboard address, e.g. http://192.168.1.20:8080}"
+: "${PHARBOR_TOKEN:?set PHARBOR_TOKEN to an API token (Account > API tokens, or: pharbor token create NAME)}"
+base=${PHARBOR_URL%/}/api
+
+call() {
+    method=$1
+    path=$2
+    body=${3:-}
+    out=$(mktemp)
+    if [ -n "$body" ]; then
+        code=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
+            -H "Authorization: Bearer $PHARBOR_TOKEN" -H 'Content-Type: application/json' \
+            --data "$body" "$base$path")
+    elif [ "$method" = GET ]; then
+        code=$(curl -sS -o "$out" -w '%{http_code}' -H "Authorization: Bearer $PHARBOR_TOKEN" "$base$path")
+    else
+        code=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
+            -H "Authorization: Bearer $PHARBOR_TOKEN" -H 'Content-Type: application/json' \
+            --data '{}' "$base$path")
+    fi
+    cat "$out"
+    rm -f "$out"
+    case "$code" in
+        2??) return 0 ;;
+        *) echo "ph: HTTP $code for $method $path" >&2; return 1 ;;
+    esac
+}
+
+newest() {
+    # number and status of the newest deployment, without jq
+    call GET "/services/$1/deployments" | tr '{' '\n' | sed -n 's/.*"number":\([0-9]*\),"status":"\([a-z]*\)".*/\1 \2/p' | head -1
+}
+
+case "${1:-}" in
+    wait)
+        id=${2:?usage: ph wait SERVICE_ID}
+        while :; do
+            d=$(newest "$id")
+            case "$d" in
+                *deploying) sleep 3 ;;
+                *) break ;;
+            esac
+        done
+        echo "$d"
+        case "$d" in
+            *failed) call GET "/services/$id/deployments/${d%% *}/log" | tail -25; exit 1 ;;
+        esac
+        ;;
+    GET | POST | PUT | PATCH | DELETE)
+        call "$1" "${2:?usage: ph METHOD PATH [JSON]}" "${3:-}"
+        echo
+        ;;
+    *)
+        sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+esac

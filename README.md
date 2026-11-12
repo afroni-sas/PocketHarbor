@@ -1,9 +1,9 @@
 # PocketHarbor
 
-Deploy and serve applications from an Android phone, without root, the way
-Railway does it in the cloud: projects of services on a canvas, deployments
-from GitHub or Docker images, databases in one click, variables, logs,
-metrics, custom domains. PocketHarbor runs on top of the
+Deploy and serve applications from an Android phone, without root, as a
+cloud platform would: projects of services on a canvas, deployments from
+GitHub or Docker images, databases in one click, variables, logs, metrics,
+custom domains. PocketHarbor runs on top of the
 [PocketDock](https://github.com/afroni-sas/PocketDock) engine, which the
 installer installs with it.
 
@@ -112,7 +112,7 @@ Without a Cloudflare account, **Without a Cloudflare account** offers a temporar
 
 ## Custom domains
 
-In a service's **Settings › Networking**, as on Railway:
+In a service's **Settings › Networking**:
 
 - **Generate Domain**: one address per service, named after the service's id, on `workers.dev` or in your zone. Its pencil changes the name and where it lives. Without Cloudflare, it gives a preview address on `trycloudflare.com`, and **Connect Cloudflare** leads to Settings › Public access.
 - **Custom Domain**: a name in one of your zones (a subdomain and the zone to pick), or any other name, and the port your app listens on.
@@ -135,11 +135,11 @@ A service built from GitHub deploys on every push to its branch (Settings › So
 
 ## Dashboard
 
-The dashboard looks like Railway's:
+The dashboard has:
 
 - a canvas of the project's services, with their connections; **Auto Layout** arranges it by references (what uses what reads left to right, arrows go around the cards), and every move can be undone;
 - per service: deployments and their logs, variables, metrics, a console, volumes and backups, cron runs, settings, in a panel whose edge drags to resize it (a double click puts it back);
-- per project: observability, logs and settings.
+- per project: observability, logs (each line's level in its colour, error lines banded) and settings.
 
 It installs as an app (Add to Home screen) when opened over HTTPS, through a domain. Browsers only allow that on secure origins.
 
@@ -155,9 +155,9 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 |---|---|
 | **Routing** | One proxy serves every service by hostname, exact names and `*.example.com`. HTTP and WebSocket. |
 | **Zero-downtime deploys** | The new version must open its port and pass its health check within the healthcheck timeout before traffic moves. The old one then drains and stops. A failed deployment leaves the running version alone. |
-| **Restart policy** | On Failure (10 tries, as on Railway), Always or Never. |
-| **Tasks** | A service that runs and exits with code 0, like migrations, is a completed deployment, as on Railway, not a failed one. |
-| **Railway variables** | References copied from Railway work as they are: `${{ db.RAILWAY_PRIVATE_DOMAIN }}` is `${{ db.PHARBOR_PRIVATE_DOMAIN }}`, and so on for the other built-in names. The variable editors colour keys, values, strings, comments and references. |
+| **Restart policy** | On Failure (10 tries by default), Always or Never. |
+| **Tasks** | A service that runs and exits with code 0, like migrations, is a completed deployment, not a failed one. |
+| **Variable editors** | Keys, values, strings, comments and `${{ service.VARIABLE }}` references are coloured as you type. |
 | **Public access** | Through your Cloudflare account, set up by PocketHarbor: its tunnel for your domains, and its relay on Workers for `workers.dev` addresses. It works behind a carrier's NAT, with HTTPS, WebSockets and no open port. |
 | **Idle sleep** | A service nobody uses stops; the next request starts it and waits for it. |
 | **Metrics** | CPU, memory, volume size and HTTP traffic (requests, 5xx, response time, bytes) of every service, sampled every 30 seconds and kept for a week. |
@@ -166,6 +166,18 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 | **Alerts** | Discord, Slack, email (Resend) or signed webhooks for failed or finished deploys, crashes, failed cron runs and backups, and CPU, memory or volume thresholds. |
 | **Web terminal** | A shell in a running service's container, from the Console tab. |
 | **Logs** | The output of every service of an environment, merged by time and searched on the phone, and one JSON line per HTTP request. Query strings are left out, since they often hold tokens. |
+
+## API and AI agents
+
+Everything the dashboard does goes through an HTTP API, documented in full in [docs/API.md](docs/API.md). Create an API token in Account › API tokens (or `pharbor token create NAME`) and send it as `Authorization: Bearer ph_...`.
+
+[skills/pocketharbor](skills/pocketharbor/SKILL.md) is a skill for AI agents (Claude Code and others that read `SKILL.md`). It teaches them to deploy, debug and manage services through that API, safely, and comes with `ph`, a small curl client. Install it from the latest release:
+
+```sh
+mkdir -p ~/.claude/skills && curl -fsSL https://github.com/afroni-sas/PocketHarbor/releases/latest/download/pocketharbor-skill.tar.gz | tar -xz -C ~/.claude/skills
+```
+
+Then give the agent `PHARBOR_URL` (the dashboard's address) and `PHARBOR_TOKEN`.
 
 ## Deploying from the command line
 
