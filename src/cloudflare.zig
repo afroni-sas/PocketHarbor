@@ -109,8 +109,22 @@ pub const Client = struct {
         return error.CloudflareUnreachable;
     }
 
-    pub fn verify(self: *Client, a: Allocator) !void {
-        _ = try self.call(a, struct { status: []const u8 = "" }, .GET, "/user/tokens/verify", null);
+    /// A user token is checked at /user/tokens; one an account owns
+    /// (cfat_...) only at its account's /tokens.
+    pub fn verify(self: *Client, a: Allocator, account: ?[]const u8) !void {
+        const Status = struct { status: []const u8 = "" };
+        if (account) |id| {
+            if (accountToken(self.token)) {
+                const path = try std.fmt.allocPrint(a, "/accounts/{s}/tokens/verify", .{id});
+                _ = try self.call(a, Status, .GET, path, null);
+                return;
+            }
+        }
+        _ = self.call(a, Status, .GET, "/user/tokens/verify", null) catch |e| {
+            const id = account orelse return e;
+            const path = try std.fmt.allocPrint(a, "/accounts/{s}/tokens/verify", .{id});
+            _ = try self.call(a, Status, .GET, path, null);
+        };
     }
 
     pub fn accounts(self: *Client, a: Allocator) ![]const Account {
@@ -174,6 +188,19 @@ pub const Client = struct {
         _ = try self.call(a, std.json.Value, .DELETE, path, null);
     }
 };
+
+/// Tokens an account owns start with cfat_; a user's with cfut_, or nothing
+/// for the older ones.
+pub fn accountToken(token: []const u8) bool {
+    return std.mem.startsWith(u8, token, "cfat_");
+}
+
+/// An account id: 32 hexadecimal digits.
+pub fn validAccount(id: []const u8) bool {
+    if (id.len != 32) return false;
+    for (id) |ch| if (!std.ascii.isHex(ch)) return false;
+    return true;
+}
 
 fn routesBody(a: Allocator, rules: []const Rule) ![]const u8 {
     var all: std.ArrayList(Rule) = .empty;
@@ -262,6 +289,15 @@ pub fn plan(a: Allocator, existing: []const DnsRecord, hosts: []const []const u8
 }
 
 const t = std.testing;
+
+test "tokens and account ids" {
+    try t.expect(accountToken("cfat_abc"));
+    try t.expect(!accountToken("cfut_abc"));
+    try t.expect(!accountToken("Ab12cd"));
+    try t.expect(validAccount("11dae778e61a9ce2d2ca76b739cc3743"));
+    try t.expect(!validAccount("11dae778e61a9ce2d2ca76b739cc374"));
+    try t.expect(!validAccount("11dae778e61a9ce2d2ca76b739cc374z"));
+}
 
 test "a name belongs to the longest zone it ends with" {
     const list = [_]Zone{ .{ .id = "1", .name = "example.com" }, .{ .id = "2", .name = "shop.example.com" }, .{ .id = "3", .name = "other.dev" } };

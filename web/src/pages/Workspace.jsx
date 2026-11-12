@@ -157,9 +157,10 @@ async function connectCloudflare(e) {
   e.preventDefault()
   const form = e.currentTarget
   const token = form.elements.token.value.trim()
+  const account = form.elements.account.value.trim()
   starting.value = true
   try {
-    await put('/cloudflare', { token })
+    await put('/cloudflare', { token, account })
     form.reset()
     toast('Cloudflare connected', 'success')
     await load('networking')
@@ -256,10 +257,13 @@ function CloudflareCard() {
             <li>
               Give it these permissions: <span class="mono">{cf.permissions}</span>.
             </li>
-            <li>Paste the token here. It is stored encrypted on this phone.</li>
+            <li>
+              Paste the token here, and for a token your account owns (it starts with <span class="mono">cfat_</span>), the Account ID shown with it or on the dashboard's Overview page. The token is stored encrypted on this phone.
+            </li>
           </ol>
-          <form class="row" onSubmit={connectCloudflare}>
-            <input class="input mono" name="token" type="password" placeholder="Cloudflare API token" required autocomplete="off" style="flex:1" />
+          <form class="cf-connect" onSubmit={connectCloudflare}>
+            <input class="input mono" name="token" type="password" placeholder="Cloudflare API token" required autocomplete="off" aria-label="Cloudflare API token" />
+            <input class="input mono" name="account" placeholder="Account ID (for cfat_ tokens)" autocomplete="off" spellcheck={false} pattern="[0-9a-fA-F]{32}" title="32 hexadecimal characters" aria-label="Cloudflare Account ID" />
             <button class="btn primary" disabled={busy}>
               {busy && <span class="spinner" style="width:13px;height:13px" />}
               Connect

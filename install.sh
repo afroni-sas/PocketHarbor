@@ -23,6 +23,7 @@
 #   --panel-domain HOST     where the dashboard answers           PHARBOR_PANEL_DOMAIN
 #   --cloudflare-token T    connect Cloudflare: tunnel and DNS   PHARBOR_CLOUDFLARE_TOKEN
 #                           records are then set up by PocketHarbor
+#   --cloudflare-account ID its account, for a cfat_ token       PHARBOR_CLOUDFLARE_ACCOUNT
 #   --tunnel-token TOKEN    start a Cloudflare tunnel            PHARBOR_TUNNEL_TOKEN
 #   --boot, --no-boot       start at boot (Termux:Boot, systemd) PHARBOR_BOOT=1|0
 #   --no-start              install and set up, do not start     PHARBOR_START=0
@@ -55,6 +56,7 @@ DOMAIN=${PHARBOR_DOMAIN:-}
 PANEL_DOMAIN=${PHARBOR_PANEL_DOMAIN:-}
 TUNNEL_TOKEN=${PHARBOR_TUNNEL_TOKEN:-}
 CLOUDFLARE_TOKEN=${PHARBOR_CLOUDFLARE_TOKEN:-}
+CLOUDFLARE_ACCOUNT=${PHARBOR_CLOUDFLARE_ACCOUNT:-}
 BOOT=${PHARBOR_BOOT:-}
 START=${PHARBOR_START:-1}
 FROM=""
@@ -94,6 +96,7 @@ Installs and sets up PocketHarbor and PocketDock. Without --yes it asks.
   --panel-domain HOST   where the dashboard answers
   --cloudflare-token T  connect your Cloudflare account: PocketHarbor makes its
                         tunnel and writes the DNS records of your domains
+  --cloudflare-account ID  the Account ID, for a token the account owns (cfat_)
   --tunnel-token TOKEN  start a Cloudflare tunnel made by hand instead
   --boot, --no-boot     start at boot (Termux:Boot or systemd)
   --no-start            install and set up, but do not start
@@ -569,6 +572,7 @@ main() {
             --panel-domain) need "$@"; PANEL_DOMAIN=$2; shift ;;
             --tunnel-token) need "$@"; TUNNEL_TOKEN=$2; shift ;;
             --cloudflare-token) need "$@"; CLOUDFLARE_TOKEN=$2; shift ;;
+            --cloudflare-account) need "$@"; CLOUDFLARE_ACCOUNT=$2; shift ;;
             --boot) BOOT=1 ;;
             --no-boot) BOOT=0 ;;
             --no-start) START=0 ;;
@@ -691,6 +695,9 @@ main() {
                 [ -n "$CLOUDFLARE_TOKEN" ] || break
                 say "${RED}That is too short for an API token; paste the whole token, or press Enter to skip.$RESET"
             done
+            case "$CLOUDFLARE_TOKEN" in
+                cfat_*) ask CLOUDFLARE_ACCOUNT "Account ID (shown with the token, or on the dashboard's Overview page)" "$CLOUDFLARE_ACCOUNT" ;;
+            esac
         fi
         if [ -z "$CLOUDFLARE_TOKEN" ] && agree "Or start a tunnel you made by hand (needs its token)?" n; then
             while :; do
@@ -841,7 +848,7 @@ main() {
             [ $back = 0 ] || ok "started $back services again"
         fi
         if [ -n "$CLOUDFLARE_TOKEN" ]; then
-            if printf '%s\n' "$CLOUDFLARE_TOKEN" | PH cloudflare connect >"$WORK/cf" 2>&1; then
+            if printf '%s\n' "$CLOUDFLARE_TOKEN" | PH cloudflare connect ${CLOUDFLARE_ACCOUNT:+--account "$CLOUDFLARE_ACCOUNT"} >"$WORK/cf" 2>&1; then
                 ok "Cloudflare connected: PocketHarbor sets up the tunnel and the DNS records"
             else
                 say "${RED}Cloudflare was not connected:$RESET $(sed 's/^error: //' "$WORK/cf" | tail -n 1)"

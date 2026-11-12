@@ -384,6 +384,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .dns-copy:hover { background: var(--gray-100); }
 .dns-copy:hover svg { opacity: 1; }
 .badge.orange { background: hsl(25, 60%, 12%); color: hsl(25, 90%, 62%); border-color: hsl(25, 50%, 24%); }
+.cf-connect { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+@media (max-width: 640px) { .cf-connect { grid-template-columns: 1fr; } }
 .cf-steps { margin: 0 0 12px; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--gray-700); line-height: 1.5; }
 .cf-steps a { color: var(--primary-fg); }
 .cf-hosts { display: flex; flex-direction: column; margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; }

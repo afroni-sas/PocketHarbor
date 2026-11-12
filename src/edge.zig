@@ -73,16 +73,26 @@ pub const Failure = struct { err: anyerror, message: []const u8 };
 
 /// Checks the token, creates this installation's tunnel in the account (or
 /// finds it again), starts it, and syncs. On failure nothing is saved.
-pub fn connect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, eng: *engine.Engine, token: []const u8, failure: *Failure) !State {
+/// `account_hint` is the account's id, which a token an account owns
+/// (cfat_...) needs when it cannot list its account.
+pub fn connect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, eng: *engine.Engine, token: []const u8, account_hint: []const u8, failure: *Failure) !State {
     var cf: cloudflare.Client = .{ .gpa = gpa, .io = io, .token = token };
     errdefer failure.message = cf.message;
-    try cf.verify(a);
-    const accounts = try cf.accounts(a);
-    if (accounts.len == 0) {
-        cf.message = "the token reaches no account: give it the Cloudflare Tunnel permission";
-        return error.CloudflareRefused;
-    }
-    const account = accounts[0].id;
+    const account: []const u8 = if (account_hint.len > 0) account_hint else blk: {
+        const accounts = cf.accounts(a) catch |e| {
+            if (cloudflare.accountToken(token)) cf.message = "this token belongs to an account: give its Account ID too (on the Cloudflare dashboard's Overview page)";
+            return e;
+        };
+        if (accounts.len == 0) {
+            cf.message = if (cloudflare.accountToken(token))
+                "this token belongs to an account: give its Account ID too (on the Cloudflare dashboard's Overview page)"
+            else
+                "the token reaches no account: give it the Cloudflare Tunnel permission";
+            return error.CloudflareRefused;
+        }
+        break :blk accounts[0].id;
+    };
+    try cf.verify(a, account);
     const id = try store.checkId();
     const name = try std.fmt.allocPrint(a, "pocketharbor-{s}", .{id[0..8]});
     const found = try cf.findTunnel(a, account, name);

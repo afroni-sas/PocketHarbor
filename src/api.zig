@@ -622,10 +622,12 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
     }
     var failure: edge.Failure = .{ .err = error.None, .message = "" };
     if (seg.len == 0 and method(c, "PUT")) {
-        const body = c.req.json(struct { token: []const u8 }) catch return c.res.fail(400, "send token");
+        const body = c.req.json(struct { token: []const u8, account: []const u8 = "" }) catch return c.res.fail(400, "send token");
         const token = std.mem.trim(u8, body.token, " \r\n\t");
+        const account = std.mem.trim(u8, body.account, " \r\n\t");
         if (token.len < 20) return c.res.fail(400, "that is not a Cloudflare API token");
-        const state = edge.connect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng, token, &failure) catch |e|
+        if (account.len > 0 and !cloudflare.validAccount(account)) return c.res.fail(400, "an Account ID is 32 hexadecimal characters");
+        const state = edge.connect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng, token, account, &failure) catch |e|
             return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
         return c.res.json(200, .{ .connected = true, .state = state });
     }

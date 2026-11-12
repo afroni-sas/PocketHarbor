@@ -19,6 +19,7 @@ const dns = @import("dns.zig");
 const github = @import("github.zig");
 const domain_check = @import("domains.zig");
 const edge = @import("edge.zig");
+const cloudflare = @import("cloudflare.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
@@ -118,7 +119,7 @@ const usage =
     \\  tunnel start TOKEN                 A permanent Cloudflare tunnel
     \\  tunnel status
     \\  tunnel stop
-    \\  cloudflare connect                 Reads an API token from stdin: PocketHarbor then
+    \\  cloudflare connect [--account ID]  Reads an API token from stdin: PocketHarbor then
     \\                                     makes its tunnel and writes the DNS records itself
     \\  cloudflare sync | status | disconnect
     \\
@@ -1264,9 +1265,17 @@ fn cmdCloudflare(c: *Ctx, args: []const [:0]const u8) !void {
     const key = crypto.loadKey(c.store.root) catch die("cannot read the master key in {s}", .{c.store.root});
     var failure: edge.Failure = .{ .err = error.None, .message = "" };
     if (eql(verb, "connect")) {
+        var account: []const u8 = "";
+        var i: usize = 1;
+        while (i < args.len) : (i += 1) {
+            if (eql(args[i], "--account")) {
+                account = value(args, &i);
+                if (!cloudflare.validAccount(account)) die("an Account ID is 32 hexadecimal characters", .{});
+            } else die("unknown option \"{s}\" for cloudflare connect", .{args[i]});
+        }
         const token = std.mem.trim(u8, try readSecretLine(c), " \r\n\t");
         if (token.len < 20) die("give the API token on stdin", .{});
-        const state = edge.connect(c.a, c.gpa, c.io, key, c.store, c.eng, token, &failure) catch |e|
+        const state = edge.connect(c.a, c.gpa, c.io, key, c.store, c.eng, token, account, &failure) catch |e|
             die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
         printEdge(state);
         return;
