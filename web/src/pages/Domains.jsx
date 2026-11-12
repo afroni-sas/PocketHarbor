@@ -137,20 +137,17 @@ export function showDnsRecords(svcId, domain) {
               <p>
                 {ready || d.foreign_active ? 'These records are in place: ' : 'Add the following DNS records to '}
                 <span class="zone">{d.zone}</span>
-                {ready || d.foreign_active
-                  ? ', and Cloudflare serves the name through your tunnel.'
-                  : ', wherever its DNS is managed: another Cloudflare account, a free subdomain service, any provider. Cloudflare then issues the certificate and sends the name through your tunnel, usually a few minutes after the records appear.'}
+                {ready || d.foreign_active ? '.' : ', wherever its DNS is. The certificate follows a few minutes later.'}
               </p>
             ) : info.managed && d.record === 'failed' && info.saas_zone ? (
               <p>{d.record_detail.charAt(0).toUpperCase() + d.record_detail.slice(1)}.</p>
             ) : info.managed && d.record === 'no_zone' ? (
               <>
                 <p>
-                  <span class="mono">{d.domain}</span> belongs to <span class="zone">{d.zone}</span>, which is not in your Cloudflare account
-                  {info.zones.length > 0 ? ` (yours: ${info.zones.join(', ')})` : ''}. Cloudflare only sends a name through a tunnel when its zone is in the tunnel's own account, so no DNS record can bring this one to the phone.
+                  <span class="zone">{d.zone}</span> is not in your Cloudflare account.
                 </p>
                 <p class="muted small">
-                  To use it anyway, with records added where its DNS is, choose a zone for such domains in{' '}
+                  Add it there, or turn on Outside domains in{' '}
                   <button
                     class="linkish"
                     onClick={() => {
@@ -159,21 +156,21 @@ export function showDnsRecords(svcId, domain) {
                     }}
                   >
                     Settings › Public access
-                  </button>
-                  . Or use a name under one of your zones: Generate Domain proposes one.
+                  </button>{' '}
+                  to point it with DNS records.
                 </p>
               </>
             ) : info.managed && d.record === 'conflict' ? (
               <p>
-                {d.record_detail.charAt(0).toUpperCase() + d.record_detail.slice(1)}. PocketHarbor does not overwrite a record it did not write: delete it in Cloudflare, then press Check again.
+                {d.record_detail.charAt(0).toUpperCase() + d.record_detail.slice(1)}. Delete it in Cloudflare, then Check again.
               </p>
             ) : info.setup === 'tunnel' ? (
               <p>
-                Add the following DNS record to <span class="zone">{d.zone}</span>, in the Cloudflare account of the tunnel, and add <span class="mono">{d.domain}</span> to the tunnel's public hostnames with the service <span class="mono">http://{origin}</span>. Or connect Cloudflare in Settings › Public access, and PocketHarbor does both.
+                Add this record to <span class="zone">{d.zone}</span>, and <span class="mono">{d.domain}</span> to the tunnel's hostnames with <span class="mono">http://{origin}</span>. Connecting Cloudflare does both for you.
               </p>
             ) : (
               <p>
-                Add the following DNS record to <span class="zone">{d.zone}</span>. It reaches this phone on your network only, at{' '}
+                Add this record to <span class="zone">{d.zone}</span>. It reaches the phone on your network only, at{' '}
                 <span class="mono">
                   http://{d.domain}
                   {info.proxy_port === 80 ? '' : `:${info.proxy_port}`}

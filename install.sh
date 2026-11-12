@@ -6,9 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/afroni-sas/PocketHarbor/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --yes --email you@example.com
 #
-# While the repository is private, give a token that can read it in
-# GITHUB_TOKEN, or be signed in with gh; the script uses either. Run it again
-# to update: the data and the settings stay.
+# Run it again to update: the data and the settings stay.
 #
 # Options (each also has a variable, which the option overrides):
 #   -y, --yes               no questions                         PHARBOR_YES=1
@@ -34,12 +32,14 @@
 # uninstall.sh, next to this script in each release, removes it again.
 #
 # Other variables: PHARBOR_RELEASE_URL and POCKETDOCK_RELEASE_URL replace the
-# download locations; PHARBOR_GITHUB_TOKEN, GITHUB_TOKEN or GH_TOKEN reach a
-# private repository.
+# download locations.
 
 set -eu
 
 REPO="afroni-sas/PocketHarbor"
+# Cloudflare's token form with PocketHarbor's permissions filled in; the same
+# as token_url in src/cloudflare.zig.
+CLOUDFLARE_TOKEN_URL="https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22argotunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=*&zoneId=all&name=PocketHarbor"
 ENGINE_REPO="afroni-sas/PocketDock"
 
 YES=${PHARBOR_YES:-0}
@@ -106,7 +106,7 @@ Each option has a variable: PHARBOR_YES, PHARBOR_VERSION, PHARBOR_INSTALL_DIR,
 PHARBOR_ROOT, PHARBOR_PORT, PHARBOR_BIND, PHARBOR_EMAIL, PHARBOR_PASSWORD,
 PHARBOR_DOMAIN, PHARBOR_PANEL_DOMAIN, PHARBOR_CLOUDFLARE_TOKEN,
 PHARBOR_TUNNEL_TOKEN, PHARBOR_BOOT,
-PHARBOR_START. A private repository is read with gh's token or GITHUB_TOKEN.
+PHARBOR_START.
 
 To remove PocketHarbor: sh uninstall.sh (it keeps the data unless --purge).
 USAGE
@@ -234,41 +234,6 @@ fetch() {
     fi
 }
 
-# fetch_auth URL ACCEPT FILE: with the token, kept out of the command line.
-fetch_auth() {
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 -H @"$HEADERS" -H "Accept: $2" -o "$3" "$1"
-    else
-        wget -q --header="Authorization: Bearer $TOKEN" --header="Accept: $2" -O "$3" "$1"
-    fi
-}
-
-github_token() {
-    t=${PHARBOR_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}
-    if [ -z "$t" ] && command -v gh >/dev/null 2>&1; then
-        t=$(gh auth token 2>/dev/null || true)
-    fi
-    printf '%s' "$t"
-}
-
-# The API address of a release asset, from the release's JSON.
-asset_url() {
-    tr ',{}[]' '\n\n\n\n\n' <"$1" |
-        sed -nE 's/^[[:space:]]*"(url|name)":[[:space:]]*"([^"]*)".*$/\1 \2/p' |
-        {
-            url=""
-            while read -r key val; do
-                case "$key" in
-                    url) case "$val" in */releases/assets/[0-9]*) url=$val ;; esac ;;
-                    name) if [ "$val" = "$2" ] && [ -n "$url" ]; then
-                        echo "$url"
-                        break
-                    fi ;;
-                esac
-            done
-        }
-}
-
 # get REPO NAME FILE [BASE_URL]: one file of a release.
 get() {
     if [ -n "$FROM" ]; then
@@ -278,18 +243,6 @@ get() {
     fi
     if [ -n "${4:-}" ]; then
         fetch "$4/$2" "$3"
-        return
-    fi
-    if [ -n "$TOKEN" ]; then
-        if [ -n "$VERSION" ] && [ "$1" = "$REPO" ]; then
-            api="https://api.github.com/repos/$1/releases/tags/$VERSION"
-        else
-            api="https://api.github.com/repos/$1/releases/latest"
-        fi
-        fetch_auth "$api" application/vnd.github+json "$WORK/release.json" || return 1
-        url=$(asset_url "$WORK/release.json" "$2")
-        [ -n "$url" ] || return 1
-        fetch_auth "$url" application/octet-stream "$3"
         return
     fi
     if [ -n "$VERSION" ] && [ "$1" = "$REPO" ]; then
@@ -303,9 +256,6 @@ get() {
 install_binary() {
     tmp="$WORK/$2"
     get "$1" "$2" "$tmp" "${4:-}" || {
-        if [ "$1" = "$REPO" ] && [ -z "$TOKEN" ] && [ -z "$FROM" ] && [ -z "${4:-}" ]; then
-            die "could not download $2. The repository is private: set GITHUB_TOKEN to a token that can read $REPO, or sign in with gh."
-        fi
         die "could not download $2. Check the connection${VERSION:+, and that release $VERSION exists}."
     }
     if [ -n "$FROM" ]; then
@@ -686,9 +636,11 @@ main() {
             say "${RED}\"$PANEL_DOMAIN\" is not a domain name, like harbor.example.com.$RESET"
             PANEL_DOMAIN=""
         done
-        say "${DIM}With a Cloudflare API token, PocketHarbor makes its tunnel and writes the DNS records of your domains."
-        say "Create one at dash.cloudflare.com/profile/api-tokens with: Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read.$RESET"
+        say "${DIM}With a Cloudflare API token, your services get public HTTPS addresses, with or without a domain."
+        say "You can also connect it later, in one click, from the dashboard: Settings > Public access.$RESET"
         if [ -z "$CLOUDFLARE_TOKEN" ] && agree "Connect your Cloudflare account now?" n; then
+            say "Open this link, which fills in the permissions, then Continue to summary and Create Token:"
+            say "$CLOUDFLARE_TOKEN_URL"
             while :; do
                 secret CLOUDFLARE_TOKEN "Cloudflare API token"
                 [ ${#CLOUDFLARE_TOKEN} -ge 20 ] && break
@@ -759,15 +711,7 @@ main() {
         WORK="$INSTALL_DIR/.pocketharbor-install.$$"
         mkdir -p "$WORK"
     }
-    HEADERS="$WORK/headers"
     trap 'rm -rf "$WORK"; restore_tty' EXIT
-    TOKEN=""
-    if [ -z "$FROM" ] && [ -z "${PHARBOR_RELEASE_URL:-}" ]; then
-        TOKEN=$(github_token)
-        if [ -n "$TOKEN" ]; then
-            (umask 077 && printf 'Authorization: Bearer %s\n' "$TOKEN" >"$HEADERS")
-        fi
-    fi
     install_binary "$ENGINE_REPO" "pdock-android-$ABI" pdock "${POCKETDOCK_RELEASE_URL:-}"
     install_binary "$REPO" "pharbor-android-$ABI" pharbor "${PHARBOR_RELEASE_URL:-}"
 

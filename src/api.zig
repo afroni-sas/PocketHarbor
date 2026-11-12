@@ -632,7 +632,7 @@ fn syncEdge(c: *Ctx) void {
 }
 
 fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
-    const create_url = "https://dash.cloudflare.com/profile/api-tokens";
+    const create_url = cloudflare.token_url;
     if (seg.len == 0 and method(c, "GET")) {
         const s = c.store.settings();
         const state = edge.load(c.store);

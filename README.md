@@ -19,8 +19,8 @@ installer installs with it.
 | Optional | What it gives | How to get it |
 |---|---|---|
 | **Termux:Boot** | PocketHarbor and its services start again when the phone restarts. | Install [Termux:Boot](https://f-droid.org/packages/com.termux.boot/) from the same place as Termux, and open it once. The installer then sets it up. |
-| **A Cloudflare account** | Your services on the internet, over HTTPS, with no port to open, even behind a carrier's network; PocketHarbor writes the DNS records itself. | A free account at [cloudflare.com](https://dash.cloudflare.com/sign-up), then an API token: see [Custom domains](#custom-domains). |
-| **A domain name** | Addresses like `app.example.com`. | Any registrar; [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) sells them at cost. Add the domain to your Cloudflare account so that PocketHarbor can manage its records. |
+| **A Cloudflare account** | Your services on the internet, over HTTPS, with no port to open, even behind a carrier's network. Without a domain, they get `workers.dev` addresses. | A free account at [cloudflare.com](https://dash.cloudflare.com/sign-up), then one click in Settings › Public access: see [Public access](#public-access). |
+| **A domain name** | Addresses like `app.example.com`, with no request limit. | Any registrar; [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) sells them at cost. Add the domain to your Cloudflare account, and PocketHarbor writes its records. A domain kept elsewhere works too, with two records: see [Custom domains](#custom-domains). |
 | **A GitHub token** | Builds of private repositories, and your repositories listed in the Add dialog. | [github.com › Settings › Developer settings › Fine-grained tokens](https://github.com/settings/personal-access-tokens/new): access to the repositories, with *Contents: Read-only*. Paste it in Settings › GitHub. |
 | **A GitHub webhook** | A deployment on every push. | Needs public access. Settings › GitHub shows the address and the secret to give the repository's Settings › Webhooks. |
 | **Alerts** | Messages when a deployment fails, a service crashes or a cron run fails. | A [Discord](https://support.discord.com/hc/en-us/articles/228383668) or [Slack](https://api.slack.com/messaging/webhooks) webhook address, or a [Resend](https://resend.com) API key for email. Settings › Alerts. |
@@ -31,7 +31,7 @@ installer installs with it.
 In Termux, or on Linux:
 
 ```sh
-gh release download -R afroni-sas/PocketHarbor -p install.sh && sh install.sh
+curl -fsSL https://github.com/afroni-sas/PocketHarbor/releases/latest/download/install.sh | sh
 ```
 
 It asks a few questions, each with a default:
@@ -51,16 +51,14 @@ Then it installs `pharbor` and `pdock`, checks their SHA-256 sums, starts everyt
 sh install.sh --yes --email you@example.com --cloudflare-token TOKEN
 ```
 
-`sh install.sh --help` lists every option. Run the installer again to update: the data, the settings and the port stay.
-
-While this repository is private, the installer needs a token that can read it: the one of `gh` when you are signed in, or `GITHUB_TOKEN`.
+`sh install.sh --help` lists every option; pass them after `sh -s --` when the script comes from curl. Run the installer again to update: the data, the settings and the port stay.
 
 From a computer with adb, push the release files and run the installer with `--from`; the release notes show how. A shell started by adb cannot start PocketHarbor at boot; Termux can.
 
 ## Uninstall
 
 ```sh
-gh release download -R afroni-sas/PocketHarbor -p uninstall.sh && sh uninstall.sh
+curl -fsSL https://github.com/afroni-sas/PocketHarbor/releases/latest/download/uninstall.sh | sh
 ```
 
 It stops PocketHarbor and its services, then removes:
@@ -90,39 +88,43 @@ pharbor deploy web --image nginx:alpine --port 80 --domain web.example.com
 pharbor tunnel quick web     # a temporary public https:// address, no account needed
 ```
 
+## Public access
+
+In **Settings › Public access**, **Create the token on Cloudflare** opens Cloudflare's form with every permission filled in. Click *Continue to summary*, then *Create Token*, and paste the token back: that is all. The installer offers the same link, and `pharbor cloudflare connect` reads the token on stdin.
+
+The token gets these permissions, on all your accounts and zones:
+
+| Permission | What PocketHarbor does with it |
+|---|---|
+| Account › Workers Scripts › Edit | Deploys its relay, which gives services `workers.dev` addresses without a domain. |
+| Account › Cloudflare Tunnel › Edit | Creates its own tunnel and starts it on the phone. |
+| Zone › DNS › Edit | Writes the record of each name, and removes it when the name goes. |
+| Zone › Zone › Read | Finds which zone holds a name. |
+| Zone › SSL and Certificates › Edit | Domains kept outside your account (optional). |
+
+Once connected, the card shows the tunnel, the relay and your zones, with two choices:
+
+- **Generated domains**: `workers.dev` (no domain needed, 100,000 requests a day on Cloudflare's free plan), or one of your zones (no limit).
+- **Outside domains**: lets domains kept in another account or at another provider work with two DNS records, through one of your zones and Cloudflare for SaaS (the first 100 names are free).
+
+PocketHarbor never touches a record it did not write, and **Disconnect** removes what it made.
+
+Without a Cloudflare account, **Without a Cloudflare account** offers a temporary `trycloudflare.com` address for one service, or a tunnel you made by hand.
+
 ## Custom domains
 
-In a service's **Settings › Networking**:
+In a service's **Settings › Networking**, as on Railway:
 
-- **Custom Domain**: adds a name and the port your app listens on.
-- **Generate Domain**: gives one in one of your Cloudflare zones, or a temporary address without Cloudflare.
+- **Generate Domain**: one address per service, named after the service's id, on `workers.dev` or in your zone.
+- **Custom Domain**: a name of yours and the port your app listens on.
 
-Until a name works, its row says *Waiting for DNS update*, and **Show DNS records** shows the record it needs.
+Until a name works, its row says *Waiting for DNS update*, and **Show DNS records** shows the records it needs. With Cloudflare connected, a name in one of your zones needs nothing: PocketHarbor writes its record. A name kept elsewhere needs the two records shown, added where its DNS is.
 
-The state is the truth, not a guess. PocketHarbor asks public DNS, then sends a request through the name. The domain shows as working only if the request reaches this phone. `pharbor domain check NAME` does the same from the command line.
-
-**With Cloudflare connected, everything is automatic.** Create a token at [Cloudflare › My Profile › API Tokens](https://dash.cloudflare.com/profile/api-tokens) (Create Token › Custom token) with these permissions:
-
-- Account › Cloudflare Tunnel › Edit
-- Zone › DNS › Edit
-- Zone › Zone › Read
-
-Then paste it in **Settings › Public access**. You can also give it to the installer with `--cloudflare-token`, or to `pharbor cloudflare connect` on stdin.
-
-PocketHarbor then:
-
-1. creates its own tunnel in your account and starts it on the phone;
-2. sends each public name through that tunnel: custom domains, the dashboard's domain, and `*.base-domain`;
-3. writes each name's DNS record in the zone that holds it, and removes the record when the name goes.
-
-It never touches a record it did not write: if one already holds the name, the domain says so. Your domain must be one of the account's zones, which is free.
+The state is checked, not guessed: PocketHarbor asks public DNS, then sends a request through the name, and the domain shows as working only if the request reaches this phone. `pharbor domain check NAME` does the same from the command line.
 
 Cloudflare's free certificate covers a zone and one level below it: `app.example.com` works, `x.app.example.com` does not, and the dashboard warns about it.
 
-**Without Cloudflare**, you have two options:
-
-- **Your network only**: point an `A` record at the phone's address. The dialog shows it, and the name then works at `http://NAME:8080` on your network.
-- **A tunnel made by hand**: add its token in Settings › Public access, then add each name to the tunnel's public hostnames yourself.
+Without Cloudflare, a name works on your network only: point an `A` record at the phone's address, and open `http://NAME:8080`.
 
 **A base domain** (Settings › General, or `pharbor domain base example.com`) gives every service `NAME.example.com` at once, through one wildcard record.
 
@@ -149,7 +151,7 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 | **Routing** | One proxy serves every service by hostname, exact names and `*.example.com`. HTTP and WebSocket. |
 | **Zero-downtime deploys** | The new version must open its port and pass its health check within the healthcheck timeout before traffic moves. The old one then drains and stops. A failed deployment leaves the running version alone. |
 | **Restart policy** | On Failure (10 tries, as on Railway), Always or Never. |
-| **Public access** | Through your Cloudflare account, set up by PocketHarbor: it works behind a carrier's NAT, with HTTPS and no open port. |
+| **Public access** | Through your Cloudflare account, set up by PocketHarbor: its tunnel for your domains, and its relay on Workers for `workers.dev` addresses. It works behind a carrier's NAT, with HTTPS, WebSockets and no open port. |
 | **Idle sleep** | A service nobody uses stops; the next request starts it and waits for it. |
 | **Metrics** | CPU, memory, volume size and HTTP traffic (requests, 5xx, response time, bytes) of every service, sampled every 30 seconds and kept for a week. |
 | **Templates** | PostgreSQL, MySQL, MariaDB, Redis, MongoDB 4.4, MinIO (S3) and NATS in one click, with a volume, a generated password and the variables other services reference, like `${{ postgres.DATABASE_URL }}`. |
@@ -199,6 +201,7 @@ Anything slow, like starting a container, runs in a separate process. That proce
 | [src/cloudflare.zig](src/cloudflare.zig), [src/edge.zig](src/edge.zig) | The Cloudflare API, and keeping the tunnel and DNS in step |
 | [src/domains.zig](src/domains.zig) | DNS records to show, and the check that a name reaches the phone |
 | [src/tunnel.zig](src/tunnel.zig) | Cloudflare Tunnel |
+| [src/relay.zig](src/relay.zig), [src/relay/worker.js](src/relay/worker.js) | The relay: a Worker and a Durable Object that hold the phone's WebSocket, and the phone's end of it |
 | [src/store.zig](src/store.zig) | Services, settings and the generated routes |
 | [src/engine.zig](src/engine.zig) | Talks to `pdock` |
 
