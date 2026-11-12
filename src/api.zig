@@ -1827,6 +1827,7 @@ fn settings(c: *Ctx) !void {
         // Never sent back; the GitHub endpoint says whether they are set.
         s.github_token = if (s.github_token.len > 0) "set" else "";
         s.cloudflare_token = if (s.cloudflare_token.len > 0) "set" else "";
+        s.relay_secret = if (s.relay_secret.len > 0) "set" else "";
         s.webhook_secret = "";
         return c.res.json(200, s);
     }
@@ -1852,6 +1853,7 @@ fn settings(c: *Ctx) !void {
         if (in.panel_domain != null) syncHooks(c);
         s.github_token = if (s.github_token.len > 0) "set" else "";
         s.cloudflare_token = if (s.cloudflare_token.len > 0) "set" else "";
+        s.relay_secret = if (s.relay_secret.len > 0) "set" else "";
         s.webhook_secret = "";
         return c.res.json(200, s);
     }

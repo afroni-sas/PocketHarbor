@@ -583,8 +583,13 @@ body.resizing iframe, body.resizing .canvas { pointer-events: none; }
 .logs-head .tabs .tab { padding: 6px 0; }
 .logs-foot { padding: 6px 18px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
 .logs .line { padding: 0 4px; border-radius: 3px; }
-.logs .line.err { color: var(--red); }
-.logs .line.warn { color: var(--yellow); }
+.logs .line.err { background: hsla(1, 62%, 45%, .13); box-shadow: inset 2px 0 var(--red); }
+/* The level word, in its level's colour; only errors band the row. */
+.lv { font-weight: 600; }
+.lv-debug { color: var(--gray-500); }
+.lv-info { color: hsl(205, 55%, 70%); }
+.lv-warn { color: var(--yellow); }
+.lv-error { color: var(--red); }
 .http-row.head { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; position: sticky; top: -14px; background: var(--bg); padding: 6px 0; }
 .http-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 pre.card { padding: 14px; }
@@ -656,10 +661,9 @@ pre.card { padding: 14px; }
 .log-line { padding: 3px 8px; border-radius: 3px; }
 .log-line:hover { background: var(--gray-50); }
 .log-line .sev { align-self: stretch; border-radius: 2px; }
-.log-line.err { background: hsla(1, 62%, 45%, .1); }
+.log-line.err { background: hsla(1, 62%, 45%, .13); }
+.log-line.err:hover { background: hsla(1, 62%, 45%, .18); }
 .log-line.err .sev { background: var(--red); }
-.log-line.warn .sev { background: var(--yellow); }
-.log-line.err .text { color: hsl(1, 70%, 78%); }
 .log-line .time { color: var(--muted); white-space: nowrap; }
 .log-line .text { white-space: pre-wrap; word-break: break-word; }
 .svc-name { font: inherit; padding: 0; border: 0; background: none; color: var(--gray-700); cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
