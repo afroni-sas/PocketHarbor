@@ -229,3 +229,12 @@ Anything slow, like starting a container, runs in a separate process. That proce
 | [src/engine.zig](src/engine.zig) | Talks to `pdock` |
 
 Releases are built by `.github/workflows/release.yml` when a `vX.Y.Z` tag matching `src/version.zig` and `build.zig.zon` is pushed.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, build and test commands, bug reports, and pull request guidelines.
+
+## License
+
+PocketHarbor is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
+For a commercial license, contact [AFRONI SAS](mailto:contact@afroni.com).
