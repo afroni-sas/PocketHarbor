@@ -72,6 +72,11 @@ pub const Service = struct {
     asleep: bool = false,
     deployment: u32 = 0,
     deployed_at: i64 = 0,
+    /// A random id that names what the service gets outside, such as its
+    /// relay Worker, instead of its name: made on first use, never changed.
+    uid: []const u8 = "",
+    /// The one name Generate Domain gave it; empty for none.
+    generated_domain: []const u8 = "",
 };
 
 /// One attempt to ship a version of a service.

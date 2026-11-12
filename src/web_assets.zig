@@ -5,7 +5,7 @@ pub const files = [_]Asset{
     .{ .path = "/apple-touch-icon.png", .type = "image/png", .body = @embedFile("web/apple-touch-icon.png") },
     .{ .path = "/assets/addon-fit-DIOBYJe3.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/addon-fit-DIOBYJe3.js") },
     .{ .path = "/assets/index-9ec84Cne.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-9ec84Cne.css") },
-    .{ .path = "/assets/index-BpHVsmyF.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-BpHVsmyF.js") },
+    .{ .path = "/assets/index-CVSD4i9E.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-CVSD4i9E.js") },
     .{ .path = "/assets/inter-latin-wght-normal-Dx4kXJAl.woff2", .type = "font/woff2", .body = @embedFile("web/assets/inter-latin-wght-normal-Dx4kXJAl.woff2") },
     .{ .path = "/assets/xterm-C8z0-R2m.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/xterm-C8z0-R2m.js") },
     .{ .path = "/assets/xterm-sLQPUA_C.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/xterm-sLQPUA_C.css") },

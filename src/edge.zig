@@ -147,59 +147,68 @@ pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, st
     }
 }
 
-/// Gives a service a public name: in the zone chosen for generated names,
+/// "ph-" and ten hexadecimal digits: what a service's generated name and
+/// relay Worker are called, so that its own name shows nowhere.
+fn newUid(a: Allocator) ![]const u8 {
+    var hex: [10]u8 = undefined;
+    sys.randomId(&hex);
+    return std.fmt.allocPrint(a, "ph-{s}", .{&hex});
+}
+
+/// The service's uid, made and saved the first time.
+fn serviceUid(a: Allocator, store: Store, id: []const u8) ![]const u8 {
+    const lock = try store.lock();
+    defer store.unlock(lock);
+    var svc = try store.load(id);
+    if (svc.uid.len > 0) return svc.uid;
+    svc.uid = try newUid(a);
+    try store.save(svc);
+    return svc.uid;
+}
+
+/// Gives a service its one generated name: in the zone chosen for them,
 /// through the tunnel and with no request limit; otherwise on workers.dev,
-/// through the relay.
+/// through the relay. Both are named after the service's uid.
 pub fn generateDomain(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, id: []const u8, failure: *Failure) ![]const u8 {
     const settings = store.settings();
-    if (settings.generated_zone.len > 0) {
+    {
         const svc = try store.load(id);
-        const label = store.publicLabel(svc);
-        const check = try store.checkId();
-        // One level below the zone: Cloudflare's free certificate covers it.
-        const host = try std.fmt.allocPrint(a, "{s}-{s}.{s}", .{ label[0..@min(label.len, 50)], check[0..6], settings.generated_zone });
-        const lock = try store.lock();
-        defer store.unlock(lock);
-        var current = try store.load(id);
-        for (current.domains) |d| if (std.ascii.eqlIgnoreCase(d, host)) return host;
-        var list: std.ArrayList([]const u8) = .empty;
-        try list.appendSlice(a, current.domains);
-        try list.append(a, host);
-        current.domains = list.items;
-        try store.save(current);
-        store.syncRoutes();
-        return host;
+        if (svc.generated_domain.len > 0) return error.AlreadyGenerated;
+        // Names made before the uid: they count as its generated one.
+        for (svc.domains) |d| if (isRelayHost(settings, d)) return error.AlreadyGenerated;
     }
-    try ensureRelay(a, gpa, io, key, store, failure);
-    var cf = try client(a, gpa, io, key, store);
-    errdefer failure.message = cf.message;
-    const s = store.settings();
-    const svc = try store.load(id);
-    const label = store.publicLabel(svc);
-    const check = try store.checkId();
-    // Worker names stop at 63 characters.
-    const name = try std.fmt.allocPrint(a, "{s}-{s}", .{ label[0..@min(label.len, 50)], check[0..6] });
-    const host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ name, s.relay_subdomain });
-    try cf.uploadWorker(a, s.cloudflare_account, name, try serviceMetadata(a, s.relay_hub), relay.worker_js);
-    try cf.enableWorkersDev(a, s.cloudflare_account, name);
+    const uid = try serviceUid(a, store, id);
+    var host: []const u8 = undefined;
+    if (settings.generated_zone.len > 0) {
+        // One level below the zone: Cloudflare's free certificate covers it.
+        host = try std.fmt.allocPrint(a, "{s}.{s}", .{ uid, settings.generated_zone });
+    } else {
+        try ensureRelay(a, gpa, io, key, store, failure);
+        var cf = try client(a, gpa, io, key, store);
+        errdefer failure.message = cf.message;
+        const s = store.settings();
+        host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ uid, s.relay_subdomain });
+        try cf.uploadWorker(a, s.cloudflare_account, uid, try serviceMetadata(a, s.relay_hub), relay.worker_js);
+        try cf.enableWorkersDev(a, s.cloudflare_account, uid);
+        var state = load(store);
+        var names: std.ArrayList([]const u8) = .empty;
+        try names.appendSlice(a, state.relay_scripts);
+        try names.append(a, uid);
+        state.relay_scripts = names.items;
+        save(store, state);
+    }
     {
         const lock = try store.lock();
         defer store.unlock(lock);
         var current = try store.load(id);
-        for (current.domains) |d| if (std.ascii.eqlIgnoreCase(d, host)) return host;
         var list: std.ArrayList([]const u8) = .empty;
         try list.appendSlice(a, current.domains);
         try list.append(a, host);
         current.domains = list.items;
+        current.generated_domain = host;
         try store.save(current);
     }
     store.syncRoutes();
-    var state = load(store);
-    var names: std.ArrayList([]const u8) = .empty;
-    try names.appendSlice(a, state.relay_scripts);
-    try names.append(a, name);
-    state.relay_scripts = names.items;
-    save(store, state);
     return host;
 }
 

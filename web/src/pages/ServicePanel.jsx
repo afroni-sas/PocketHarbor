@@ -852,7 +852,7 @@ function Settings({ svc }) {
 
         <Section id="networking" icon={Network} title="Networking" keys="domain public private port tunnel">
           <Group label="Public Networking" keys="domain custom public tunnel dns generate">
-            <PublicNetworking svc={svc} update={update} quickTunnel={generateDomain} label={privateName(svc)} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
+            <PublicNetworking svc={svc} update={update} quickTunnel={generateDomain} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
           </Group>
           <Group label="Private Networking" hint="Communicate with this service from within the phone's private network." keys="private internal dns port">
             <PrivateNetworking svc={svc} update={update} />
