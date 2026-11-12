@@ -699,24 +699,100 @@ pre.card { padding: 14px; }
 
 
 /* Data */
-.data-view { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 14px; min-height: calc(100vh - 240px); }
-.data-list { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); padding: 6px; overflow: auto; max-height: calc(100vh - 240px); }
-.data-list header { display: flex; align-items: center; padding: 2px 4px 6px 6px; }
-.data-item { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 8px; border: 0; border-radius: 5px; background: none; cursor: pointer; font-size: 12.5px; text-align: left; color: var(--gray-700); }
-.data-item:hover { background: var(--gray-100); color: var(--fg); }
-.data-item.on { background: var(--primary-soft); color: var(--primary-fg); }
-.data-item svg { flex: none; color: var(--muted); }
-.data-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
-.data-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.query { display: flex; flex-direction: column; gap: 8px; }
-.result-table { overflow: auto; max-height: calc(100vh - 420px); min-height: 120px; border: 1px solid var(--border); border-radius: var(--radius); }
-.result-table table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; width: max-content; min-width: 100%; }
-.result-table th { position: sticky; top: 0; background: var(--gray-50); text-align: left; font-weight: 600; color: var(--gray-700); }
-.result-table th, .result-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.result-table tr:hover td { background: var(--gray-50); }
-.result-text { margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: calc(100vh - 420px); overflow: auto; }
-.result-text.failed { border-color: var(--red-border); color: var(--red); }
-.result-foot { font-size: 12px; color: var(--muted); }
+.db-view { display: flex; flex-direction: column; gap: 18px; }
+.db-subtabs { display: flex; gap: 22px; margin: -6px 0 0; padding: 0 2px; border-bottom: 1px solid var(--border-soft); }
+.db-subtabs button { padding: 10px 0; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; color: var(--muted); font-size: 13.5px; cursor: pointer; }
+.db-subtabs button:hover { color: var(--fg); }
+.db-subtabs button.on { color: var(--fg); border-bottom-color: var(--primary-fg); }
+.db-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.db-schema { display: flex; flex-direction: column; gap: 6px; max-width: 260px; }
+.db-head { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+.db-head > b { font-size: 15px; font-weight: 600; }
+.db-head .btn.icon.on { color: var(--primary-fg); background: var(--primary-soft); }
+.crumb { padding: 0; border: 0; background: none; color: var(--muted); font-size: 15px; cursor: pointer; }
+.crumb:hover { color: var(--fg); }
+.crumb-sep { color: var(--gray-400); }
+.crumb-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.db-search { max-width: 360px; height: 32px; }
+.db-filter { display: flex; gap: 8px; }
+.db-filter .input { flex: 1; height: 32px; }
+/* The raw query bar, and what it returns. */
+.raw-bar { display: flex; gap: 8px; align-items: flex-start; }
+.raw-bar textarea { flex: 1; height: auto; min-height: 36px; padding: 8px 12px; line-height: 1.5; resize: none; font-size: 12.5px; }
+.raw-bar .btn { height: 36px; }
+.raw-result { display: flex; flex-direction: column; gap: 6px; }
+.raw-result-head { display: flex; align-items: center; gap: 8px; }
+.raw-text { margin: 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--term-bg); font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+.raw-text.failed { border-color: var(--red-border); color: var(--red); }
+/* Table | Raw */
+.seg { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-2); }
+.seg button { height: 24px; padding: 0 10px; border: 0; border-radius: 5px; background: none; color: var(--muted); font-size: 12px; cursor: pointer; }
+.seg button.on { background: var(--gray-100); color: var(--fg); }
+/* The tables, as cards. */
+.db-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
+.db-card { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 92px; padding: 14px 10px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); color: var(--gray-800); cursor: pointer; transition: border-color .12s, background-color .12s; }
+.db-card:hover { border-color: hsl(37, 45%, 38%); background: var(--gray-50); }
+.db-card svg { width: 22px; height: 22px; color: var(--primary-fg); stroke-width: 1.6; }
+.db-card .name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.db-card .rows { margin-top: -4px; font-size: 11px; color: var(--muted); }
+.db-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 40px 0; border: 1px dashed var(--border); border-radius: var(--radius); }
+.db-error { margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; }
+/* The grid. */
+.db-grid-wrap { overflow: auto; max-height: max(260px, calc(100vh - 480px)); border: 1px solid var(--border); border-radius: var(--radius); }
+.db-grid { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-size: 13px; }
+.db-grid th { position: sticky; top: 0; z-index: 1; background: var(--bg-2); text-align: left; font-weight: 500; color: var(--gray-600); font-size: 12.5px; border-bottom: 1px solid var(--border); }
+.db-grid th, .db-grid td { height: 38px; padding: 0 14px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.db-grid td { border-bottom: 1px solid var(--border-soft); color: var(--gray-800); }
+.db-grid tbody tr:last-child td { border-bottom: 0; }
+.db-grid tbody tr:hover td { background: var(--gray-50); }
+.db-grid tr.clickable { cursor: pointer; }
+.db-grid .n { text-align: right; font-variant-numeric: tabular-nums; }
+.db-grid td.none { height: 64px; text-align: center; }
+.db-grid .actions { width: 40px; padding: 0 6px; text-align: right; position: sticky; right: 0; background: var(--bg); }
+.db-grid th.actions { background: var(--bg-2); z-index: 2; }
+.db-grid tbody tr:hover td.actions { background: var(--gray-50); }
+.db-grid tbody tr .actions .btn { opacity: 0; }
+.db-grid tbody tr:hover .actions .btn, .db-grid .actions .btn:focus-visible { opacity: 1; }
+.db-grid .th { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.db-grid .th:disabled { cursor: default; }
+.db-grid .th svg { width: 12px; height: 12px; }
+.db-grid .pk, .row-form .pk { width: 12px; height: 12px; color: var(--primary-fg); }
+.db-grid td.can-edit { cursor: text; }
+.db-grid td.editing { padding: 0 4px; }
+.cell-input { width: 100%; min-width: 120px; height: 30px; padding: 0 9px; border: 1px solid var(--primary); border-radius: 5px; background: var(--bg); outline: none; font-size: 12.5px; }
+.db-grid .null { color: var(--gray-400); font-style: italic; font-size: 12px; }
+.db-grid .bool.true { color: var(--green); }
+.db-grid .bool.false { color: var(--gray-500); }
+.db-grid .num { font-variant-numeric: tabular-nums; }
+.db-grid .json, .db-grid .oid { font-family: var(--mono); font-size: 12px; color: var(--gray-700); }
+.db-pager { display: flex; align-items: center; gap: 10px; }
+.db-pager .pages { display: flex; align-items: center; gap: 2px; }
+.db-pager .pages span { padding: 0 6px; white-space: nowrap; }
+.db-foot { padding: 8px 14px; border-top: 1px solid var(--border-soft); }
+.type-badge { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; font-family: var(--mono); background: var(--gray-100); color: var(--gray-700); }
+.type-badge.string { color: hsl(95, 30%, 67%); }
+.type-badge.hash { color: hsl(38, 72%, 66%); }
+.type-badge.list { color: hsl(205, 48%, 72%); }
+.type-badge.set, .type-badge.zset { color: hsl(320, 35%, 72%); }
+.key-meta { display: flex; gap: 14px; }
+.key-string { display: flex; flex-direction: column; gap: 8px; }
+/* Forms of the data view. */
+.row-form { display: flex; flex-direction: column; gap: 12px; max-height: 60vh; overflow: auto; padding-right: 4px; }
+.row-form label { display: inline-flex; align-items: center; gap: 6px; }
+.row-field { display: flex; align-items: center; gap: 10px; }
+.row-field .input { flex: 1; }
+.cols-editor { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.cols-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) 34px 38px 28px; gap: 8px; align-items: center; width: 100%; }
+.cols-row.head { font-size: 12px; color: var(--muted); }
+.cols-row .input { height: 32px; }
+.cols-row input[type=checkbox] { justify-self: center; }
+/* Stats */
+.stats { display: flex; flex-direction: column; gap: 14px; }
+.stats-title { font-size: 15px; font-weight: 600; margin-top: 6px; }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+.stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); }
+.stat b { font-size: 16px; font-weight: 500; }
+.stat b.green { color: var(--green); }
 
 
 /* Projects page, as on Railway */
@@ -908,8 +984,10 @@ pre.card { padding: 14px; }
   .http-row.head { display: none; }
   .charts.three { grid-template-columns: 1fr; }
   .thresholds { grid-template-columns: 1fr; }
-  .data-view { grid-template-columns: 1fr; }
-  .data-list { max-height: 180px; }
+  .db-cards { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+  .db-pager { flex-wrap: wrap; }
+  .cols-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px 30px 28px; }
+  .cols-row > :nth-child(3) { display: none; }
   .channel { flex-wrap: wrap; }
   .channel .what { flex-basis: calc(100% - 44px); }
   .console { height: calc(100vh - 230px); }

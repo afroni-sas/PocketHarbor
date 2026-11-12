@@ -139,6 +139,7 @@ The dashboard has:
 
 - a canvas of the project's services, with their connections; **Auto Layout** arranges it by references (what uses what reads left to right, arrows go around the cards), and every move can be undone;
 - per service: deployments and their logs, variables, metrics, a console, volumes and backups, cron runs, settings, in a panel whose edge drags to resize it (a double click puts it back);
+- per database (PostgreSQL, MySQL, MariaDB, Redis, MongoDB): its tables, keys or collections as cards, each opening as a grid that pages, sorts, filters and edits in place, with new rows, columns and tables; a bar for raw queries, a Raw view of what is shown, and statistics;
 - per project: observability, logs (each line's level in its colour, error lines banded) and settings.
 
 It installs as an app (Add to Home screen) when opened over HTTPS, through a domain. Browsers only allow that on secure origins.
