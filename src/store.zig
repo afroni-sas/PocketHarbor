@@ -127,6 +127,10 @@ pub const Settings = struct {
     relay_subdomain: []const u8 = "",
     relay_hub: []const u8 = "",
     relay_version: []const u8 = "",
+    /// Where Generate Domain puts names: a zone of the account, through the
+    /// tunnel, with no request limit; empty for workers.dev, through the
+    /// relay, which the Workers free plan limits to 100,000 requests a day.
+    generated_zone: []const u8 = "",
 };
 
 /// Names end up in hostnames and file paths.
