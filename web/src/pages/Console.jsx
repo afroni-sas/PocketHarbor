@@ -15,14 +15,31 @@ let observer = null
 let element = null
 let wanted = null
 
+// The terminal in the dashboard's warm browns: one background with its
+// frame (--term-bg), a mustard cursor, and sixteen colours chosen to read
+// on it without glaring.
 const theme = {
-  background: '#13111c',
-  foreground: '#e4e2ee',
-  cursor: '#b9a8ff',
-  cursorAccent: '#13111c',
-  selectionBackground: 'rgba(144, 133, 233, 0.35)',
-  black: '#1e1b2b',
-  brightBlack: '#5c5873',
+  background: '#141210',
+  foreground: '#e9e2d6',
+  cursor: '#e0aa55',
+  cursorAccent: '#141210',
+  selectionBackground: 'rgba(224, 170, 85, 0.28)',
+  black: '#2a2520',
+  red: '#e0705f',
+  green: '#93c283',
+  yellow: '#e0b255',
+  blue: '#7fa6cc',
+  magenta: '#c995b3',
+  cyan: '#83c2b7',
+  white: '#d8d0c3',
+  brightBlack: '#6f665a',
+  brightRed: '#f08a78',
+  brightGreen: '#aad89a',
+  brightYellow: '#f2c873',
+  brightBlue: '#99bbde',
+  brightMagenta: '#dcaecb',
+  brightCyan: '#9ad6cb',
+  brightWhite: '#f6efe4',
 }
 
 function sendSize() {

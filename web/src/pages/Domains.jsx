@@ -5,11 +5,12 @@
 
 import { signal } from '@preact/signals'
 import { ArrowRight, Check, CircleCheck, Copy, Globe, Info, Pencil, Plus, Trash, TriangleAlert, Zap } from 'lucide-preact'
-import { enc, get, post } from '../api.js'
+import { enc, get, post, put } from '../api.js'
 import { closeOverlay, overlay, toast } from '../state.js'
 import { navigate } from '../router.js'
 import { copy, Spinner } from '../ui.jsx'
-import { privateName } from '../project.js'
+import { privateName, refresh } from '../project.js'
+import { ConnectButton } from '../connect.jsx'
 
 /** The domains of the service on screen, with their records and states. */
 export const domainInfo = signal({ id: '', data: null, checking: false, at: 0 })
@@ -17,6 +18,29 @@ export const domainInfo = signal({ id: '', data: null, checking: false, at: 0 })
 const form = signal('')
 const draft = signal({ domain: '', prefix: '', zone: '', port: '', error: '', busy: false })
 const nameCheck = signal({ name: '', result: null })
+
+/** What is happening to a name, until it is done: "SERVICE DOMAIN" → text.
+ * A name being added shows as a row before the server lists it. */
+const pending = signal({})
+const generating = '(generating)'
+
+/** Cloudflare is connected in Settings › Public access. */
+function connectCloudflare() {
+  closeOverlay()
+  navigate('/settings?tab=networking')
+}
+
+function setPending(svcId, domain, text) {
+  const key = `${svcId} ${domain}`
+  const next = { ...pending.peek() }
+  if (text) next[key] = text
+  else delete next[key]
+  pending.value = next
+}
+
+function pendingOf(svcId, domain) {
+  return pending.value[`${svcId} ${domain}`] || ''
+}
 
 /** Each load gets a number: only the latest may change what is shown. */
 let latest = 0
@@ -269,11 +293,17 @@ function removeDomain(svc, domain, update, generated) {
             class="btn danger-solid"
             onClick={async () => {
               closeOverlay()
+              if (form.peek() === `edit:${domain}`) form.value = ''
+              const managed = domainInfo.peek().data && domainInfo.peek().data.managed
+              setPending(svc.id, domain, !managed ? 'Removing' : domain.endsWith('.workers.dev') ? 'Removing the domain and its Worker' : 'Removing the domain and its DNS record')
               try {
                 await update(svc, { domains: svc.domains.filter((x) => x !== domain) }, true)
-                loadDomains(svc.id)
+                await loadDomains(svc.id)
+                toast(`${domain} removed`, 'success')
               } catch (err) {
                 toast(err.message, 'error')
+              } finally {
+                setPending(svc.id, domain, '')
               }
             }}
           >
@@ -285,11 +315,30 @@ function removeDomain(svc, domain, update, generated) {
   )
 }
 
+/** A name on its way in or out: what is happening, with no action to take. */
+function PendingRow({ domain, text, port }) {
+  return (
+    <div class="net-row busy" aria-busy="true">
+      <span class="net-icon">
+        <Spinner />
+      </span>
+      <div class="net-what">
+        <span class="net-name">{domain}</span>
+        <span class="net-sub">
+          <ArrowRight width={11} height={11} /> Port {port} · <span class="muted">{text}…</span>
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function Row({ svc, d, info, update }) {
   const state = stateOf(d, info)
   const custom = d.kind === 'custom' || d.kind === 'generated'
   const editing = form.value === `edit:${d.domain}`
+  const busy = pendingOf(svc.id, d.domain)
   const href = d.status === 'active' && d.via !== 'https' ? `http://${d.domain}${d.via.includes('port') ? `:${info.proxy_port}` : ''}` : `https://${d.domain}`
+  if (busy) return <PendingRow domain={d.domain} text={busy} port={svc.port || 8080} />
   return (
     <>
       <div class={`net-row${editing ? ' open' : ''}`}>
@@ -346,7 +395,7 @@ function Row({ svc, d, info, update }) {
           )}
         </span>
       </div>
-      {editing && <EditForm svc={svc} d={d} update={update} />}
+      {editing && <EditForm svc={svc} d={d} info={info} update={update} />}
     </>
   )
 }
@@ -374,13 +423,48 @@ async function savePort(svc, update, port) {
   }
 }
 
-function EditForm({ svc, d, update }) {
+/** "ph-0a1b.example.workers.dev" → ["ph-0a1b", "example.workers.dev"]. */
+function splitGenerated(domain) {
+  const dot = domain.indexOf('.')
+  return [domain.slice(0, dot), domain.slice(dot + 1)]
+}
+
+async function renameGenerated(svc, update, d, label, suffix, info, port) {
+  const zone = suffix === info.relay_suffix ? '' : suffix
+  form.value = ''
+  setPending(svc.id, d.domain, 'Updating the domain')
+  try {
+    const res = await put(`/services/${enc(svc.id)}/generate-domain`, { label, zone })
+    await savePort(svc, update, port)
+    await refresh()
+    await loadDomains(svc.id)
+    toast(`${res.domain} is ready`, 'success')
+  } catch (err) {
+    toast(err.message, 'error')
+    draft.value = { ...draft.peek(), error: err.message }
+    form.value = `edit:${d.domain}`
+  } finally {
+    setPending(svc.id, d.domain, '')
+  }
+}
+
+function EditForm({ svc, d, info, update }) {
   const v = draft.value
   const port = portOf(v.port)
-  const changed = port && port !== (svc.port || 8080)
+  // A generated name: its label and where it lives can change.
+  const editable = d.kind === 'generated' && info.managed
+  const [label0, suffix0] = splitGenerated(d.domain)
+  const suffixes = editable ? [...(info.relay_suffix ? [info.relay_suffix] : []), ...(info.zones || [])] : []
+  if (editable && !suffixes.includes(suffix0)) suffixes.unshift(suffix0)
+  const label = (v.prefix || label0).trim().toLowerCase()
+  const suffix = v.zone || suffix0
+  const renamed = editable && (label !== label0 || suffix !== suffix0)
+  const labelOk = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label)
+  const changed = (port && port !== (svc.port || 8080)) || renamed
   const submit = async (e) => {
     e.preventDefault()
-    if (!changed) return
+    if (!changed || (renamed && !labelOk)) return
+    if (renamed) return renameGenerated(svc, update, d, label, suffix, info, port)
     try {
       await savePort(svc, update, port)
       form.value = ''
@@ -388,9 +472,36 @@ function EditForm({ svc, d, update }) {
       draft.value = { ...draft.peek(), error: err.message }
     }
   }
+  const escape = (e) => e.key === 'Escape' && (e.preventDefault(), (form.value = ''))
+  let hint = v.error || (d.kind === 'base' ? 'The name comes from the base domain; the port is the service’s' : 'Update your target port')
+  if (!v.error && editable) {
+    hint = renamed && !labelOk ? 'Use a-z, 0-9 and dashes' : suffix.endsWith('.workers.dev') ? 'On workers.dev: 100,000 requests a day' : `In ${suffix}, through the tunnel: no request limit`
+  }
   return (
     <form class="net-form inline" onSubmit={submit}>
-      <input class="input" value={d.domain} disabled aria-label="Domain" />
+      {editable ? (
+        <div class="domain-input">
+          <input
+            class="input mono"
+            value={v.prefix || label0}
+            aria-label="Name"
+            spellcheck={false}
+            autocomplete="off"
+            onInput={(e) => (draft.value = { ...draft.peek(), prefix: e.currentTarget.value, error: '' })}
+            onKeyDown={escape}
+          />
+          <span class="domain-dot">.</span>
+          <select class="select mono" value={suffix} aria-label="Where" onChange={(e) => (draft.value = { ...draft.peek(), zone: e.currentTarget.value, error: '' })}>
+            {suffixes.map((x) => (
+              <option key={x} value={x}>
+                {x}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : (
+        <input class="input" value={d.domain} disabled aria-label="Domain" />
+      )}
       <label for="edit-port">Enter the port your app is listening on</label>
       <input
         class="input"
@@ -399,15 +510,15 @@ function EditForm({ svc, d, update }) {
         min="1"
         max="65535"
         value={v.port}
-        autofocus
+        autofocus={!editable}
         onInput={(e) => (draft.value = { ...draft.peek(), port: e.currentTarget.value, error: '' })}
-        onKeyDown={(e) => e.key === 'Escape' && (e.preventDefault(), (form.value = ''))}
+        onKeyDown={escape}
       />
-      <Foot hint={v.error || (d.kind === 'base' ? 'The name comes from the base domain; the port is the service’s' : 'Update your target port')} error={!!v.error}>
+      <Foot hint={hint} error={!!v.error || (renamed && !labelOk)}>
         <button type="button" class="btn sm" onClick={() => (form.value = '')}>
           Cancel
         </button>
-        <button class="btn primary sm" disabled={!changed}>
+        <button class="btn primary sm" disabled={!changed || (renamed && !labelOk)}>
           Update
         </button>
       </Foot>
@@ -432,8 +543,9 @@ function checkName(svc, name) {
   }, 250)
 }
 
-async function addDomain(svc, update, domain, port) {
+async function addDomain(svc, update, domain, port, managed) {
   draft.value = { ...draft.peek(), busy: true, error: '' }
+  setPending(svc.id, domain, managed ? 'Adding the domain and writing its DNS record' : 'Adding the domain')
   try {
     await update(svc, { domains: [...svc.domains, domain] }, true)
     await savePort(svc, update, port)
@@ -442,22 +554,32 @@ async function addDomain(svc, update, domain, port) {
     // The dialog opens at once, as on Railway; the check fills it in.
     const data = await get(`/services/${enc(svc.id)}/domains`)
     if (domainInfo.peek().id === svc.id) domainInfo.value = { ...domainInfo.peek(), data }
+    setPending(svc.id, domain, '')
     showDnsRecords(svc.id, domain)
     loadDomains(svc.id)
   } catch (err) {
     draft.value = { ...draft.peek(), busy: false, error: err.message }
+  } finally {
+    setPending(svc.id, domain, '')
   }
 }
 
-function CustomForm({ svc, update }) {
+const other = '(other)'
+
+function CustomForm({ svc, update, info }) {
   const v = draft.value
-  const domain = cleanDomain(v.domain)
+  const zones = (info && info.managed && info.zones) || []
+  // With zones, a name in one of them, or any other one.
+  const zone = zones.length ? v.zone || zones[0] : other
+  const prefix = v.prefix.trim().toLowerCase().replace(/\.+$/, '')
+  const domain = zone === other ? cleanDomain(v.domain) : cleanDomain(prefix ? `${prefix}.${zone}` : zone)
+  const typed = zone === other ? v.domain.trim() : prefix
   const c = nameCheck.value.name === domain ? nameCheck.value.result : null
   let hint = 'Enter your custom domain'
   let ok = false
   let error = !!v.error
   if (v.error) hint = v.error
-  else if (v.domain.trim() && !domain) {
+  else if (typed && !domain) {
     hint = 'Enter a domain name, like app.example.com'
     error = true
   } else if (c && c.owner) {
@@ -480,24 +602,69 @@ function CustomForm({ svc, update }) {
       class="net-form"
       onSubmit={(e) => {
         e.preventDefault()
-        if (domain && !(c && c.owner)) addDomain(svc, update, domain, port)
+        if (domain && !(c && c.owner)) addDomain(svc, update, domain, port, info && info.managed)
       }}
     >
       <b>Add Custom Domain</b>
-      <input
-        class="input"
-        placeholder="example.com"
-        value={v.domain}
-        autofocus
-        spellcheck={false}
-        autocomplete="off"
-        aria-label="Custom domain"
-        onInput={(e) => {
-          draft.value = { ...draft.peek(), domain: e.currentTarget.value, error: '' }
-          checkName(svc, cleanDomain(e.currentTarget.value))
-        }}
-        onKeyDown={(e) => e.key === 'Escape' && (e.preventDefault(), (form.value = ''))}
-      />
+      {zones.length > 0 && (
+        <div class="domain-input">
+          {zone !== other && (
+            <>
+              <input
+                class="input mono"
+                placeholder="app"
+                value={v.prefix}
+                autofocus
+                spellcheck={false}
+                autocomplete="off"
+                aria-label="Subdomain"
+                onInput={(e) => {
+                  const next = { ...draft.peek(), prefix: e.currentTarget.value, error: '' }
+                  draft.value = next
+                  const p = next.prefix.trim().toLowerCase()
+                  checkName(svc, cleanDomain(p ? `${p}.${zone}` : zone))
+                }}
+                onKeyDown={(e) => e.key === 'Escape' && (e.preventDefault(), (form.value = ''))}
+              />
+              <span class="domain-dot">.</span>
+            </>
+          )}
+          <select
+            class="select mono"
+            value={zone}
+            aria-label="Zone"
+            onChange={(e) => {
+              const z = e.currentTarget.value
+              draft.value = { ...draft.peek(), zone: z, error: '' }
+              if (z !== other) checkName(svc, cleanDomain(prefix ? `${prefix}.${z}` : z))
+              else checkName(svc, cleanDomain(draft.peek().domain))
+            }}
+          >
+            {zones.map((z) => (
+              <option key={z} value={z}>
+                {z}
+              </option>
+            ))}
+            <option value={other}>Another domain…</option>
+          </select>
+        </div>
+      )}
+      {zone === other && (
+        <input
+          class="input"
+          placeholder="example.com"
+          value={v.domain}
+          autofocus
+          spellcheck={false}
+          autocomplete="off"
+          aria-label="Custom domain"
+          onInput={(e) => {
+            draft.value = { ...draft.peek(), domain: e.currentTarget.value, error: '' }
+            checkName(svc, cleanDomain(e.currentTarget.value))
+          }}
+          onKeyDown={(e) => e.key === 'Escape' && (e.preventDefault(), (form.value = ''))}
+        />
+      )}
       <label for="custom-port">Enter the port your app is listening on</label>
       <input
         class="input"
@@ -521,24 +688,28 @@ function CustomForm({ svc, update }) {
   )
 }
 
-async function generateRelayDomain(svc, update, port) {
+async function generateRelayDomain(svc, update, port, info) {
   draft.value = { ...draft.peek(), busy: true, error: '' }
+  form.value = ''
+  setPending(svc.id, generating, info.generates_in ? `Writing its DNS record in ${info.generates_in}` : 'Deploying its Worker on workers.dev')
   try {
     await savePort(svc, update, port)
     const res = await post(`/services/${enc(svc.id)}/generate-domain`)
-    form.value = ''
     draft.value = { domain: '', prefix: '', zone: '', port: '', error: '', busy: false }
-    toast(`${res.domain} is ready`, 'success')
+    await refresh()
     await loadDomains(svc.id)
+    toast(`${res.domain} is ready`, 'success')
   } catch (err) {
     draft.value = { ...draft.peek(), busy: false, error: err.message }
+    form.value = 'generate'
+  } finally {
+    setPending(svc.id, generating, '')
   }
 }
 
 /** Railway's Generate Service Domain: an address on workers.dev through the
- * relay; without it, a name in one of the Cloudflare zones, or a temporary
- * address. */
-function GenerateForm({ svc, update, info, quickTunnel }) {
+ * relay, or a name in the zone chosen for generated names. */
+function GenerateForm({ svc, update, info }) {
   const v = draft.value
   const zones = info.zones || []
   if (info.relay_ready || info.generates_in) {
@@ -548,7 +719,7 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
         class="net-form"
         onSubmit={(e) => {
           e.preventDefault()
-          generateRelayDomain(svc, update, portOf(v.port))
+          generateRelayDomain(svc, update, portOf(v.port), info)
         }}
       >
         <b>Generate Service Domain</b>
@@ -577,36 +748,6 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
       </div>
     )
   }
-  if (!info.managed) {
-    return (
-      <form
-        class="net-form"
-        onSubmit={async (e) => {
-          e.preventDefault()
-          draft.value = { ...draft.peek(), busy: true }
-          try {
-            await savePort(svc, update, portOf(v.port))
-            await quickTunnel(svc)
-            form.value = ''
-          } finally {
-            draft.value = { ...draft.peek(), busy: false }
-          }
-        }}
-      >
-        <b>Generate Service Domain</b>
-        <label for="gen-port">Enter the port your app is listening on</label>
-        <input class="input" id="gen-port" type="number" min="1" max="65535" placeholder={String(svc.port || 8080)} value={v.port} autofocus onInput={(e) => (draft.value = { ...draft.peek(), port: e.currentTarget.value })} />
-        <Foot hint={info.managed ? 'Your Cloudflare account has no zone yet: this gives a temporary trycloudflare.com address' : 'A temporary trycloudflare.com address; connect Cloudflare in Settings for lasting ones'}>
-          <button type="button" class="btn sm" onClick={() => (form.value = '')}>
-            Cancel
-          </button>
-          <button class="btn primary sm" disabled={v.busy}>
-            {v.busy && <Spinner />} Generate Domain
-          </button>
-        </Foot>
-      </form>
-    )
-  }
   // Cloudflare is connected, but neither the relay nor a zone for generated
   // names is ready: say what is missing.
   return (
@@ -629,17 +770,29 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
 }
 
 /** Railway's Public Networking: the list, the forms and the two buttons. */
-export function PublicNetworking({ svc, update, quickTunnel, quick }) {
+export function PublicNetworking({ svc, update, quick }) {
   const state = domainInfo.value
   const info = state.id === svc.id ? state.data : null
   // The generated name first, as on Railway.
   const list = info ? [...info.domains.filter((d) => d.kind === 'generated'), ...info.domains.filter((d) => d.kind !== 'generated')] : null
   const hasGenerated = !!(list && list.some((d) => d.kind === 'generated'))
   const open = form.value
-  const any = (list && list.length > 0) || quick || svc.hostnames.includes('*')
+  // Names on their way in, that the list does not have yet.
+  const prefix = `${svc.id} `
+  const incoming = Object.entries(pending.value)
+    .filter(([k]) => k.startsWith(prefix))
+    .map(([k, text]) => ({ domain: k.slice(prefix.length), text }))
+    .filter((p) => !(list && list.some((d) => d.domain === p.domain)))
+  const any = (list && list.length > 0) || quick || svc.hostnames.includes('*') || incoming.length > 0
   return (
     <>
-      <p class="net-hint">{any ? 'Access your application over HTTP with the following domains' : 'Access to this service publicly through HTTP'}</p>
+      <p class="net-hint">
+        {any
+          ? 'Access your application over HTTP with the following domains'
+          : info && !info.managed
+            ? 'Connect Cloudflare to reach this service from the internet, over HTTPS'
+            : 'Access to this service publicly through HTTP'}
+      </p>
       {list === null && svc.hostnames.some((h) => h !== '*') && (
         <div class="empty">
           <Spinner />
@@ -655,7 +808,7 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
                   {quick.replace(/^https:\/\//, '')}
                 </a>
                 <span class="net-sub">
-                  <ArrowRight width={11} height={11} /> Port {svc.port || 8080} · temporary address
+                  <ArrowRight width={11} height={11} /> Port {svc.port || 8080} · Preview URL
                 </span>
               </div>
               <span class="net-actions">
@@ -665,6 +818,9 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
               </span>
             </div>
           )}
+          {incoming.map((p) => (
+            <PendingRow key={p.domain} domain={p.domain === generating ? 'Generating a domain' : p.domain} text={p.text} port={svc.port || 8080} />
+          ))}
           {list && list.map((d) => <Row key={d.domain} svc={svc} d={d} info={info} update={update} />)}
           {svc.hostnames.includes('*') && (
             <div class="net-row">
@@ -679,12 +835,18 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
           )}
         </div>
       )}
-      {open === 'custom' && <CustomForm svc={svc} update={update} />}
-      {open === 'generate' && info && <GenerateForm svc={svc} update={update} info={info} quickTunnel={quickTunnel} />}
+      {open === 'custom' && info && info.managed && <CustomForm svc={svc} update={update} info={info} />}
+      {open === 'generate' && info && info.managed && <GenerateForm svc={svc} update={update} info={info} />}
+      {info && !info.managed && (
+        <div class="net-buttons">
+          <ConnectButton kind="cloudflare" small onClick={connectCloudflare} />
+        </div>
+      )}
+      {info && info.managed && (
       <div class="net-buttons">
         <button
           class="btn sm"
-          disabled={open === 'generate' || hasGenerated}
+          disabled={open === 'generate' || hasGenerated || !!pendingOf(svc.id, generating)}
           title={hasGenerated ? 'A service has one generated domain: remove it to make another' : undefined}
           onClick={() => {
             draft.value = { domain: '', prefix: '', zone: '', port: '', error: '', busy: false }
@@ -705,6 +867,7 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
           <Plus class="accent" /> Custom Domain
         </button>
       </div>
+      )}
     </>
   )
 }

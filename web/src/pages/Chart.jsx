@@ -7,7 +7,7 @@ import { Check, ChevronDown, Clock } from 'lucide-preact'
 import { openMenu } from '../ui.jsx'
 
 /** Validated on the dark surface: one hue alone, or blue and orange together. */
-export const colors = { single: '#9085e9', first: '#3987e5', second: '#d95926' }
+export const colors = { single: '#d4a03f', first: '#3987e5', second: '#d95926' }
 
 /** Which chart is hovered, and at which sample. */
 const hover = signal(null)

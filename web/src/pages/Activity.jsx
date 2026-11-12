@@ -16,6 +16,7 @@ const alerts = signal(null)
 
 const what = {
   active: 'Deployed',
+  completed: 'Ran',
   removed: 'Replaced',
   failed: 'Failed to deploy',
   deploying: 'Deploying',
@@ -24,7 +25,7 @@ const what = {
 function Mark({ status }) {
   if (status === 'failed') return <CircleX class="feed-mark red" />
   if (status === 'deploying') return <span class="status-spin purple feed-mark" />
-  return <CircleCheck class={`feed-mark${status === 'active' ? ' green' : ''}`} />
+  return <CircleCheck class={`feed-mark${status === 'active' || status === 'completed' ? ' green' : ''}`} />
 }
 
 /** "Today", "Yesterday" or the date: the headings of the feed. */

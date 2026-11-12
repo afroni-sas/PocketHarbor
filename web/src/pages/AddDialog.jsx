@@ -10,6 +10,7 @@ import { navigate } from '../router.js'
 import { markDirty, openService, page, refresh } from '../project.js'
 import { GithubIcon, openForm, ServiceIcon, Spinner } from '../ui.jsx'
 import { createService, nextSpot, uniqueName } from './Canvas.jsx'
+import { ConnectButton } from '../connect.jsx'
 
 const view = signal('root')
 const query = signal('')
@@ -264,15 +265,17 @@ function Dialog() {
           ) : (
             <div class="palette-list" role="listbox">
               {v === 'repo' && r && !r.has_token && (
-                <button
-                  class="add-note link"
-                  onClick={() => {
-                    closeOverlay()
-                    navigate('/settings?tab=github')
-                  }}
-                >
-                  <Info /> Paste owner/name above. Add a GitHub token in Settings to list your repositories here.
-                </button>
+                <div class="add-connect">
+                  <span>Connect GitHub to list your repositories here, or paste owner/name above.</span>
+                  <ConnectButton
+                    kind="github"
+                    small
+                    onClick={() => {
+                      closeOverlay()
+                      navigate('/settings?tab=github')
+                    }}
+                  />
+                </div>
               )}
               {v === 'repo' && r && r.error && <div class="add-note red">{r.error}</div>}
               {v === 'repo' && !r && (

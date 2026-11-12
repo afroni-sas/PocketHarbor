@@ -2,11 +2,12 @@
 // registries and the people who can sign in.
 
 import { effect, signal, untracked } from '@preact/signals'
-import { Bell, Cloud, Copy, ExternalLink, Eye, EyeOff, Plus, Server, Settings as SettingsIcon, Trash, Users } from 'lucide-preact'
+import { Bell, Cloud, Copy, Eye, EyeOff, Plus, Server, Settings as SettingsIcon, Trash, Users } from 'lucide-preact'
 import { del, get, patch, post, put } from '../api.js'
 import { me, toast } from '../state.js'
 import { navigate, route, withQuery } from '../router.js'
 import { attempt, confirm, copy, GithubIcon, openForm, Spinner, timeAgo } from '../ui.jsx'
+import { CloudflareIcon, ConnectButton, TokenSteps } from '../connect.jsx'
 import { SettingsLayout } from './SettingsLayout.jsx'
 import { Alerts } from './Alerts.jsx'
 
@@ -153,34 +154,6 @@ function stopTunnel() {
   })
 }
 
-/** The token, and the Account ID if any, out of whatever was pasted: the
- * token alone, or all that Cloudflare shows once it is made. */
-export function readCloudflarePaste(text) {
-  const word = text.trim()
-  const token =
-    (text.match(/cf[a-z]{2}_[A-Za-z0-9_-]{20,}/) || text.match(/(?<![\w-])[\w-]{40}(?![\w-])/) || [/^\S{20,}$/.test(word) ? word : ''])[0]
-  const account = (text.replace(token, '').match(/(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/i) || [''])[0]
-  return { token, account }
-}
-
-async function connectCloudflare(e) {
-  e.preventDefault()
-  const form = e.currentTarget
-  const { token, account } = readCloudflarePaste(form.elements.token.value)
-  if (!token) return toast('Paste the token that Cloudflare shows', 'error')
-  starting.value = true
-  try {
-    await put('/cloudflare', { token, account })
-    form.reset()
-    toast('Cloudflare connected', 'success')
-    await load('networking')
-  } catch (err) {
-    toast(err.message, 'error')
-  } finally {
-    starting.value = false
-  }
-}
-
 async function syncCloudflare() {
   starting.value = true
   try {
@@ -194,14 +167,24 @@ async function syncCloudflare() {
   }
 }
 
+const disconnecting = signal(false)
+
 function disconnectCloudflare() {
   confirm({
     title: 'Disconnect Cloudflare?',
-    body: 'Your domains stop answering from the internet. The services keep running.',
+    body: 'PocketHarbor removes its DNS records, Workers and webhooks. Your domains stop answering from the internet; the services keep running.',
     action: 'Disconnect',
     onConfirm: async () => {
-      await del('/cloudflare')
-      await load('networking')
+      disconnecting.value = true
+      try {
+        await del('/cloudflare')
+        toast('Cloudflare disconnected', 'success')
+      } catch (err) {
+        toast(err.message, 'error')
+      } finally {
+        disconnecting.value = false
+        await load('networking')
+      }
     },
   })
 }
@@ -253,19 +236,14 @@ function CloudflareCard() {
   if (!cf.connected) {
     return (
       <section class="card card-pad set-card">
-        <h3>Cloudflare</h3>
-        <p class="muted small" style="margin:-6px 0 14px">Your services on the internet, over HTTPS, with no port to open.</p>
-        <a class="btn primary" href={cf.create_url} target="_blank" rel="noreferrer">
-          Create the token on Cloudflare <ExternalLink />
-        </a>
-        <form class="cf-paste" onSubmit={connectCloudflare}>
-          <input class="input mono" name="token" type="password" placeholder="Paste the token here" required autocomplete="off" aria-label="Cloudflare token" />
-          <button class="btn" disabled={busy}>
-            {busy && <span class="spinner" style="width:13px;height:13px" />}
-            Connect
-          </button>
-        </form>
-        <p class="muted small" style="margin:8px 0 0">The permissions are filled in: Continue to summary, Create Token, then paste it here.</p>
+        <h3 class="brand-title">
+          <span class="brand-mark cloudflare">
+            <CloudflareIcon size={16} />
+          </span>
+          Cloudflare
+        </h3>
+        <p class="muted small card-desc">Your services on the internet, over HTTPS, with no port to open.</p>
+        <TokenSteps kind="cloudflare" onDone={() => load('networking')} />
       </section>
     )
   }
@@ -274,13 +252,19 @@ function CloudflareCard() {
   return (
     <section class="card card-pad set-card">
       <div class="cf-head">
-        <h3>Cloudflare</h3>
+        <h3 class="brand-title">
+          <span class="brand-mark cloudflare">
+            <CloudflareIcon size={16} />
+          </span>
+          Cloudflare
+        </h3>
         <span class="spacer" />
         <button class="btn sm" onClick={syncCloudflare} disabled={busy} title={st.synced_at ? `Synced ${timeAgo(st.synced_at)}` : undefined}>
           {busy && <span class="spinner" style="width:12px;height:12px" />} Sync
         </button>
-        <button class="btn sm danger" onClick={disconnectCloudflare} disabled={busy}>
-          Disconnect
+        <button class="btn sm danger" onClick={disconnectCloudflare} disabled={busy || disconnecting.value}>
+          {disconnecting.value && <span class="spinner" style="width:12px;height:12px" />}
+          {disconnecting.value ? 'Disconnecting' : 'Disconnect'}
         </button>
       </div>
       <div class="cf-checks">
@@ -406,89 +390,131 @@ function Networking() {
   )
 }
 
-function setGithubToken(remove) {
-  if (remove) {
-    return confirm({
-      title: 'Remove the GitHub token?',
-      body: 'Builds of private repositories stop working.',
-      action: 'Remove',
-      onConfirm: async () => {
-        await put('/github', { token: '' })
-        await load('github')
-      },
-    })
-  }
-  openForm({
-    title: 'GitHub token',
-    submit: 'Save',
-    render: () => (
-      <div class="field">
-        <label for="ghtoken">Personal access token</label>
-        <input class="input mono" id="ghtoken" name="token" type="password" placeholder="github_pat_..." required autofocus autocomplete="off" />
-        <span class="hint">A fine-grained token with read access to the contents of the repositories. It is stored encrypted.</span>
-      </div>
-    ),
-    onSubmit: async ({ token }) => {
-      await put('/github', { token: token.trim() })
+function removeGithubToken() {
+  confirm({
+    title: 'Remove the GitHub token?',
+    body: 'Builds of private repositories stop, and PocketHarbor can no longer manage the webhooks that deploy on push.',
+    action: 'Remove',
+    onConfirm: async () => {
+      await put('/github', { token: '' })
       await load('github')
-      toast('Token saved', 'success')
     },
   })
+}
+
+const replacingGithub = signal(false)
+
+const hookText = {
+  ready: 'Deploys on push',
+  needs_cloudflare: 'Needs Cloudflare, so that GitHub reaches the phone',
+  needs_token: 'Needs a GitHub token',
+  denied: 'The token may not add its webhook',
+  failed: 'Not set up',
+  pending: 'Set up at the next sync',
 }
 
 function Github() {
   const g = data.value.github
   if (!g) return <Spinner />
-  const tunnel = data.value.tunnel
-  const origin = tunnel && tunnel.url ? tunnel.url : location.origin
-  const url = origin + g.webhook_path
+  const url = (g.target || location.origin + g.webhook_path)
+  const replacing = replacingGithub.value
   return (
     <>
       <section class="card card-pad set-card">
-        <h3>Access</h3>
-        <div class="row">
-          <span class={`badge${g.has_token ? ' green' : ''}`}>{g.has_token ? 'Token set' : 'No token'}</span>
-          <span class="muted small" style="flex:1">{g.has_token ? 'Private repositories can be built.' : 'Public repositories build without one.'}</span>
-          {g.has_token && (
-            <button class="btn sm" onClick={() => setGithubToken(true)}>
-              Remove
-            </button>
+        <div class="cf-head">
+          <h3 class="brand-title">
+            <span class="brand-mark github">
+              <GithubIcon size={15} />
+            </span>
+            GitHub
+          </h3>
+          <span class="spacer" />
+          {g.has_token && !replacing && (
+            <>
+              <button class="btn sm" onClick={() => (replacingGithub.value = true)}>
+                Replace
+              </button>
+              <button class="btn sm danger" onClick={removeGithubToken}>
+                Remove
+              </button>
+            </>
           )}
-          <button class="btn sm primary" onClick={() => setGithubToken(false)}>
-            {g.has_token ? 'Replace' : 'Add token'}
-          </button>
         </div>
+        {g.has_token && !replacing ? (
+          <div class="cf-checks">
+            <span class="cf-check">
+              <span class="dot green" /> Token saved: private repositories build, and pushes deploy
+            </span>
+          </div>
+        ) : (
+          <>
+            <p class="muted small card-desc">Private repositories, your repositories in the Add dialog, and deploy on push.</p>
+            <TokenSteps
+              kind="github"
+              onDone={async () => {
+                replacingGithub.value = false
+                await load('github')
+              }}
+            />
+          </>
+        )}
       </section>
       <section class="card card-pad set-card">
         <h3>Deploy on push</h3>
-        <p class="muted small" style="margin:-6px 0 12px">
-          In the repository, open Settings, Webhooks, Add webhook, with the content type application/json and the push event. GitHub must reach the phone, through a tunnel or a domain.
+        <p class="muted small card-desc">
+          {g.cloudflare && g.has_token
+            ? 'Automatic: each repository a service deploys from gets its webhook.'
+            : !g.cloudflare
+              ? 'Automatic once Cloudflare is connected: GitHub then reaches the phone.'
+              : 'Automatic once the GitHub token above is saved.'}
         </p>
-        <div class="stack">
-          <div class="field">
-            <label>Payload URL</label>
-            <div class="code-box">
-              {url}
-              <span class="spacer" />
-              <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(url)}>
-                <Copy />
-              </button>
+        {!g.cloudflare && (
+          <div class="card-action">
+            <ConnectButton kind="cloudflare" small onClick={() => navigate('/settings?tab=networking')} />
+          </div>
+        )}
+        {g.hooks && g.hooks.length > 0 && (
+          <div class="hook-list">
+            {g.hooks.map((h) => (
+              <div class="cf-host" key={h.repo}>
+                <span class={`dot ${h.status === 'ready' ? 'green' : 'yellow'}`} />
+                <a class="mono" href={`https://github.com/${h.repo}/settings/hooks`} target="_blank" rel="noreferrer">
+                  {h.repo}
+                </a>
+                <span class="muted small cf-detail">{h.detail || hookText[h.status]}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <details class="cf-details">
+          <summary class="muted small">Set it up by hand</summary>
+          <p class="muted small">In the repository: Settings › Webhooks › Add webhook, content type application/json, the push event.</p>
+          <div class="stack">
+            <div class="field">
+              <label>Payload URL</label>
+              <div class="code-box">
+                {url}
+                <span class="spacer" />
+                <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(url)}>
+                  <Copy />
+                </button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Secret</label>
+              <div class="code-box">
+                {showSecret.value ? g.webhook_secret : '•'.repeat(24)}
+                <span class="spacer" />
+                <button class="btn ghost icon sm" aria-label={showSecret.value ? 'Hide' : 'Show'} onClick={() => (showSecret.value = !showSecret.value)}>
+                  {showSecret.value ? <EyeOff /> : <Eye />}
+                </button>
+                <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(g.webhook_secret)}>
+                  <Copy />
+                </button>
+              </div>
             </div>
           </div>
-          <div class="field">
-            <label>Secret</label>
-            <div class="code-box">
-              {showSecret.value ? g.webhook_secret : '•'.repeat(24)}
-              <span class="spacer" />
-              <button class="btn ghost icon sm" aria-label={showSecret.value ? 'Hide' : 'Show'} onClick={() => (showSecret.value = !showSecret.value)}>
-                {showSecret.value ? <EyeOff /> : <Eye />}
-              </button>
-              <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(g.webhook_secret)}>
-                <Copy />
-              </button>
-            </div>
-          </div>
-        </div>
+        </details>
       </section>
     </>
   )

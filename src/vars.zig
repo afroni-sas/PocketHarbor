@@ -249,7 +249,13 @@ const Scope = struct {
         }
         const entry = self.services.get(service) orelse return null;
         if (find(entry.vars, name)) |v| return try self.expand(service, v, depth + 1);
-        return find(entry.builtins, name);
+        if (find(entry.builtins, name)) |v| return v;
+        // Variables copied from Railway name the same values RAILWAY_*.
+        if (std.mem.startsWith(u8, name, "RAILWAY_")) {
+            const alias = try std.fmt.allocPrint(self.a, "PHARBOR_{s}", .{name["RAILWAY_".len..]});
+            return find(entry.builtins, alias);
+        }
+        return null;
     }
 
     fn expand(self: *Scope, service: []const u8, value: []const u8, depth: u8) anyerror![]const u8 {
@@ -283,6 +289,19 @@ const Scope = struct {
 };
 
 const t = std.testing;
+
+test "Railway's names for the built-in variables" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var warnings: std.ArrayList([]const u8) = .empty;
+    var scope: Scope = .{ .a = a, .shared = &.{}, .warnings = &warnings };
+    try scope.services.put(a, "nats", .{ .vars = &.{}, .builtins = &.{.{ .name = "PHARBOR_PRIVATE_DOMAIN", .value = "shop-nats" }} });
+    try scope.services.put(a, "api", .{ .vars = &.{.{ .name = "NATS_URL", .value = "nats://${{nats.RAILWAY_PRIVATE_DOMAIN}}:4222" }}, .builtins = &.{} });
+    const out = try scope.all("api");
+    try t.expectEqualStrings("nats://shop-nats:4222", out[0].value);
+    try t.expectEqual(@as(usize, 0), warnings.items.len);
+}
 
 test "reads .env files" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);

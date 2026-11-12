@@ -429,7 +429,12 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         }
         eng.remove(container);
     }
-    const ports = try waitForPort(eng, container, svc.port, deadline);
+    const ports = waitForPort(eng, container, svc.port, deadline) catch |e| {
+        // A task, like migrations: it ran and finished well. As on
+        // Railway, that is a completed deployment, not a failed one.
+        if (e == error.ContainerExited and finishedWell(eng, container)) return complete(store, eng, id, svc, record, log, container);
+        return e;
+    };
     log.say("Listening on port {d}, checking health", .{ports.container});
     try waitHealthy(eng, container, ports.host, svc.health_path, deadline);
 
@@ -461,6 +466,40 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         eng.remove(old);
     }
     log.say("Deployed {s}", .{svc.name});
+}
+
+/// Whether the container stopped by itself with exit code 0.
+fn finishedWell(eng: *Engine, container: []const u8) bool {
+    const info = eng.inspect(container) orelse return false;
+    return !info.alive() and info.restarts == 0 and info.exit_code == 0;
+}
+
+/// Records a task's run as completed: its container stays, for its logs,
+/// and the previous one goes.
+fn complete(store: Store, eng: *Engine, id: []const u8, svc: *Service, record: *Deployment, log: Log, container: []const u8) !void {
+    var old: []const u8 = "";
+    {
+        const lock = try store.lock();
+        defer store.unlock(lock);
+        var current = try store.load(id);
+        old = current.container;
+        current.container = container;
+        current.host_port = 0;
+        current.asleep = false;
+        current.deployed_at = nowS();
+        try store.save(current);
+        store.syncRoutes();
+    }
+    record.status = "completed";
+    record.finished_at = nowS();
+    try store.saveDeployment(id, record.*);
+    retirePrevious(store, id, record.number);
+    pruneImages(store, eng, id);
+    if (old.len > 0 and !std.mem.eql(u8, old, container)) {
+        eng.stop(old, 10);
+        eng.remove(old);
+    }
+    log.say("Completed: {s} ran and exited with code 0", .{svc.name});
 }
 
 const Built = struct { image: []const u8, generated: bool };
@@ -591,7 +630,7 @@ pub fn cronRun(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8) 
     const svc = try store.load(id);
     var active: ?Deployment = null;
     for (try store.listDeployments(id)) |d| {
-        if (std.mem.eql(u8, d.status, "active")) {
+        if (store_mod.isCurrent(d.status)) {
             active = d;
             break;
         }
@@ -667,7 +706,7 @@ fn saveSnapshot(store: Store, vars: vars_mod.Vars, id: []const u8, number: u32, 
 fn retirePrevious(store: Store, id: []const u8, number: u32) void {
     const all = store.listDeployments(id) catch return;
     for (all) |d| {
-        if (d.number == number or !std.mem.eql(u8, d.status, "active")) continue;
+        if (d.number == number or !store_mod.isCurrent(d.status)) continue;
         var old = d;
         old.status = "removed";
         store.saveDeployment(id, old) catch {};

@@ -414,7 +414,7 @@ fn runOptions(c: *Ctx, trigger: []const u8) deploy.RunOptions {
 
 fn activeDeployment(c: *Ctx, id: []const u8) u32 {
     for (c.store.listDeployments(id) catch &.{}) |d| {
-        if (eql(d.status, "active")) return d.number;
+        if (store_mod.isCurrent(d.status)) return d.number;
     }
     die("nothing is deployed yet", .{});
 }

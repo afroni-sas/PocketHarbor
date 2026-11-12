@@ -36,7 +36,8 @@ import {
 } from 'lucide-preact'
 import { del, enc, get, patch, post } from '../api.js'
 import { me, services, toast } from '../state.js'
-import { closeService, markDirty, page, privateName, refresh, serviceId, setQuery } from '../project.js'
+import { navigate } from '../router.js'
+import { closeService, markDirty, page, panelWidth, privateName, refresh, savePanelWidth, serviceId, setQuery } from '../project.js'
 import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, size, Spinner, StatusMark, statusOf, timeAgo } from '../ui.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { LogsView } from './Logs.jsx'
@@ -247,6 +248,7 @@ function source(svc, d) {
 const notes = { redeploy: 'redeploy', rollback: 'rollback', webhook: 'push' }
 
 function badgeOf(svc, d, active) {
+  if (active && d.status === 'completed') return { label: 'Completed', color: 'green' }
   if (active) return { label: 'Active', color: 'green' }
   if (d.status === 'deploying') return { label: svc.repo ? 'Building' : 'Deploying', color: 'purple', spin: true }
   if (d.status === 'failed') return { label: 'Failed', color: 'red' }
@@ -405,7 +407,7 @@ function Deployments({ svc }) {
     )
   }
   if (!list) return <div class="empty"><Spinner /></div>
-  const activeAt = list.findIndex((x) => x.status === 'active')
+  const activeAt = list.findIndex((x) => x.status === 'active' || x.status === 'completed')
   const split = activeAt >= 0 ? activeAt + 1 : Math.min(1, list.length)
   const top = list.slice(0, split)
   const history = list.slice(split)
@@ -434,7 +436,7 @@ function Deployments({ svc }) {
         </div>
       )}
       {top.map((x) => (
-        <DeployCard key={x.number} svc={svc} d={x} active={x.status === 'active'} />
+        <DeployCard key={x.number} svc={svc} d={x} active={x.status === 'active' || x.status === 'completed'} />
       ))}
       {history.length > 0 && (
         <>
@@ -683,12 +685,60 @@ function connect(svc, kind) {
   })
 }
 
-async function generateDomain(svc) {
-  await attempt(async () => {
-    const res = await post('/tunnel/quick', { service: svc.id })
-    tunnel.value = await get('/tunnel').catch(() => ({ url: res.url, default_service: svc.id, running: true }))
-    toast(`Public at ${res.url}`, 'success')
-  })
+const pushText = {
+  ready: 'GitHub calls the phone on each push',
+  needs_cloudflare: 'GitHub cannot reach the phone yet: connect Cloudflare',
+  needs_token: 'Add a GitHub token, so that PocketHarbor adds the webhook',
+  denied: 'The GitHub token may not add the webhook: give it Webhooks: Read and write',
+  failed: 'The webhook is not set up',
+  pending: 'The webhook is not set up yet',
+}
+
+const settingUp = signal(false)
+
+async function setUpWebhook() {
+  settingUp.value = true
+  try {
+    await post('/github/sync')
+    await refresh()
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    settingUp.value = false
+  }
+}
+
+/** Whether pushes reach the phone, and the one thing to do when not. */
+function PushState({ svc }) {
+  const p = svc.deploy_on_push
+  if (!p) return null
+  const ok = p.status === 'ready'
+  const fix = p.status === 'needs_cloudflare' ? ['Connect Cloudflare', '/settings?tab=networking'] : p.status === 'ready' ? null : ['Settings › GitHub', '/settings?tab=github']
+  return (
+    <div class="push-state">
+      <span class={`dot ${ok ? 'green' : 'yellow'}`} />
+      <span class="small">
+        {p.status === 'failed' && p.detail ? `The webhook is not set up: ${p.detail}` : pushText[p.status]}
+        {p.status === 'pending' ? (
+          <>
+            {' · '}
+            <button class="linkish" onClick={setUpWebhook} disabled={settingUp.value}>
+              {settingUp.value ? 'Setting up…' : 'Set up now'}
+            </button>
+          </>
+        ) : (
+          fix && (
+            <>
+              {' · '}
+              <button class="linkish" onClick={() => navigate(fix[1])}>
+                {fix[0]}
+              </button>
+            </>
+          )
+        )}
+      </span>
+    </div>
+  )
 }
 
 function addVolume(svc) {
@@ -802,8 +852,9 @@ function Settings({ svc }) {
               <Group label="Auto Deploy" keys="auto deploy push webhook">
                 <label class="check">
                   <input type="checkbox" checked={svc.auto_deploy} onChange={(e) => attempt(() => update(svc, { auto_deploy: e.currentTarget.checked }, true), 'Saved')} />
-                  Deploy on every push (needs the GitHub webhook of Settings)
+                  Deploy on every push to {svc.branch || 'main'}
                 </label>
+                {svc.auto_deploy && <PushState svc={svc} />}
               </Group>
             </>
           ) : svc.image ? (
@@ -852,7 +903,7 @@ function Settings({ svc }) {
 
         <Section id="networking" icon={Network} title="Networking" keys="domain public private port tunnel">
           <Group label="Public Networking" keys="domain custom public tunnel dns generate">
-            <PublicNetworking svc={svc} update={update} quickTunnel={generateDomain} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
+            <PublicNetworking svc={svc} update={update} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
           </Group>
           <Group label="Private Networking" hint="Communicate with this service from within the phone's private network." keys="private internal dns port">
             <PrivateNetworking svc={svc} update={update} />
@@ -999,6 +1050,66 @@ function Settings({ svc }) {
   )
 }
 
+const MIN_PANEL = 480
+
+/** The widest the panel may be: the canvas keeps a strip to click on. */
+function maxPanel(aside) {
+  const stage = aside.parentElement.getBoundingClientRect()
+  return Math.max(MIN_PANEL, stage.width - 160)
+}
+
+/** The left edge of the panel: dragged, it sets the panel's width, which
+ * this browser keeps; a double click puts the default back. */
+function Resizer() {
+  const down = (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const handle = e.currentTarget
+    const aside = handle.parentElement
+    const right = aside.getBoundingClientRect().right
+    handle.setPointerCapture(e.pointerId)
+    document.body.classList.add('resizing')
+    let moved = false
+    const move = (ev) => {
+      moved = true
+      const width = Math.min(maxPanel(aside), Math.max(MIN_PANEL, right - ev.clientX))
+      panelWidth.value = Math.round(width)
+    }
+    const up = () => {
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', up)
+      handle.removeEventListener('pointercancel', up)
+      document.body.classList.remove('resizing')
+      // A click alone, or the double click that resets, changes nothing.
+      if (moved) savePanelWidth(panelWidth.peek())
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', up)
+    handle.addEventListener('pointercancel', up)
+  }
+  const key = (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    const aside = e.currentTarget.parentElement
+    const now = aside.getBoundingClientRect().width
+    const step = e.shiftKey ? 96 : 24
+    savePanelWidth(Math.min(maxPanel(aside), Math.max(MIN_PANEL, now + (e.key === 'ArrowLeft' ? step : -step))))
+  }
+  return (
+    <div
+      class="panel-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the panel"
+      title="Drag to resize · double-click to reset"
+      tabIndex={0}
+      onPointerDown={down}
+      onKeyDown={key}
+      onDblClick={() => savePanelWidth(0)}
+    />
+  )
+}
+
 export function ServicePanel() {
   const p = page.value
   const list = services.value
@@ -1030,7 +1141,8 @@ export function ServicePanel() {
   const tab = tabs.some(([id]) => id === p.tab) ? p.tab : tabs[0][0]
   return (
     <>
-      <aside class="panel" aria-label={svc.name}>
+      <aside class="panel" aria-label={svc.name} style={panelWidth.value ? `--panel-w:${panelWidth.value}px` : undefined}>
+        <Resizer />
         <div class="panel-head">
           <div class="panel-title">
             <ServiceIcon svc={svc} size={26} />

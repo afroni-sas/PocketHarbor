@@ -124,6 +124,7 @@ export function statusOf(svc) {
     case 'restarting': return { label: 'Restarting', color: 'yellow', mark: 'spin' }
     case 'asleep': return { label: 'Sleeping', color: 'gray', mark: 'moon' }
     case 'exited': return { label: 'Crashed', color: 'red', mark: 'x' }
+    case 'completed': return { label: 'Completed', color: 'green', mark: 'check' }
     case 'failed': return { label: latest && latest.status === 'failed' ? 'Deploy failed' : 'Failed', color: 'red', mark: 'x' }
     case 'new': return { label: 'No deployments', color: 'gray', mark: 'dot' }
     default: return { label: svc.status, color: 'gray', mark: 'dot' }
