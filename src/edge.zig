@@ -50,10 +50,22 @@ pub fn isRelayHost(s: store_mod.Settings, host: []const u8) bool {
 }
 
 /// "web-02f48b.example.workers.dev" -> "web-02f48b", the Worker's name.
-fn relayScript(s: store_mod.Settings, host: []const u8) []const u8 {
+fn relayScript(host: []const u8) []const u8 {
     const dot = std.mem.indexOfScalar(u8, host, '.') orelse host.len;
-    _ = s;
     return host[0..dot];
+}
+
+/// The services' Workers that the relay names in use need. The hub serves
+/// the dashboard's name but is not one of them: it is never removed or
+/// uploaded as a service's.
+fn serviceScripts(a: Allocator, hub: []const u8, hosts: []const []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (hosts) |h| {
+        const name = relayScript(h);
+        if (std.mem.eql(u8, name, hub)) continue;
+        try out.append(a, name);
+    }
+    return out.items;
 }
 
 const compatibility_date = "2025-06-01";
@@ -129,43 +141,74 @@ pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, st
     // The services' Workers run the same code: they follow it.
     if (s.relay_version.len > 0 and !std.mem.eql(u8, s.relay_version, &version)) {
         for (load(store).relay_scripts) |name| {
+            if (std.mem.eql(u8, name, hub)) continue;
             cf.uploadWorker(a, s.cloudflare_account, name, try serviceMetadata(a, hub), relay.worker_js) catch {};
         }
     }
 }
 
-/// Gives a service an address on workers.dev, served through the relay.
+/// "ph-" and ten hexadecimal digits: what a service's generated name and
+/// relay Worker are called, so that its own name shows nowhere.
+fn newUid(a: Allocator) ![]const u8 {
+    var hex: [10]u8 = undefined;
+    sys.randomId(&hex);
+    return std.fmt.allocPrint(a, "ph-{s}", .{&hex});
+}
+
+/// The service's uid, made and saved the first time.
+fn serviceUid(a: Allocator, store: Store, id: []const u8) ![]const u8 {
+    const lock = try store.lock();
+    defer store.unlock(lock);
+    var svc = try store.load(id);
+    if (svc.uid.len > 0) return svc.uid;
+    svc.uid = try newUid(a);
+    try store.save(svc);
+    return svc.uid;
+}
+
+/// Gives a service its one generated name: in the zone chosen for them,
+/// through the tunnel and with no request limit; otherwise on workers.dev,
+/// through the relay. Both are named after the service's uid.
 pub fn generateDomain(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, id: []const u8, failure: *Failure) ![]const u8 {
-    try ensureRelay(a, gpa, io, key, store, failure);
-    var cf = try client(a, gpa, io, key, store);
-    errdefer failure.message = cf.message;
-    const s = store.settings();
-    const svc = try store.load(id);
-    const label = store.publicLabel(svc);
-    const check = try store.checkId();
-    // Worker names stop at 63 characters.
-    const name = try std.fmt.allocPrint(a, "{s}-{s}", .{ label[0..@min(label.len, 50)], check[0..6] });
-    const host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ name, s.relay_subdomain });
-    try cf.uploadWorker(a, s.cloudflare_account, name, try serviceMetadata(a, s.relay_hub), relay.worker_js);
-    try cf.enableWorkersDev(a, s.cloudflare_account, name);
+    const settings = store.settings();
+    {
+        const svc = try store.load(id);
+        if (svc.generated_domain.len > 0) return error.AlreadyGenerated;
+        // Names made before the uid: they count as its generated one.
+        for (svc.domains) |d| if (isRelayHost(settings, d)) return error.AlreadyGenerated;
+    }
+    const uid = try serviceUid(a, store, id);
+    var host: []const u8 = undefined;
+    if (settings.generated_zone.len > 0) {
+        // One level below the zone: Cloudflare's free certificate covers it.
+        host = try std.fmt.allocPrint(a, "{s}.{s}", .{ uid, settings.generated_zone });
+    } else {
+        try ensureRelay(a, gpa, io, key, store, failure);
+        var cf = try client(a, gpa, io, key, store);
+        errdefer failure.message = cf.message;
+        const s = store.settings();
+        host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ uid, s.relay_subdomain });
+        try cf.uploadWorker(a, s.cloudflare_account, uid, try serviceMetadata(a, s.relay_hub), relay.worker_js);
+        try cf.enableWorkersDev(a, s.cloudflare_account, uid);
+        var state = load(store);
+        var names: std.ArrayList([]const u8) = .empty;
+        try names.appendSlice(a, state.relay_scripts);
+        try names.append(a, uid);
+        state.relay_scripts = names.items;
+        save(store, state);
+    }
     {
         const lock = try store.lock();
         defer store.unlock(lock);
         var current = try store.load(id);
-        for (current.domains) |d| if (std.ascii.eqlIgnoreCase(d, host)) return host;
         var list: std.ArrayList([]const u8) = .empty;
         try list.appendSlice(a, current.domains);
         try list.append(a, host);
         current.domains = list.items;
+        current.generated_domain = host;
         try store.save(current);
     }
     store.syncRoutes();
-    var state = load(store);
-    var names: std.ArrayList([]const u8) = .empty;
-    try names.appendSlice(a, state.relay_scripts);
-    try names.append(a, name);
-    state.relay_scripts = names.items;
-    save(store, state);
     return host;
 }
 
@@ -390,17 +433,16 @@ pub fn sync(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: St
             state.relay_error = if (failure.message.len > 0) failure.message else "the relay could not be deployed";
         };
     }
-    var wanted: std.ArrayList([]const u8) = .empty;
-    for (relay_hosts.items) |h| {
-        try outcomes.append(a, .{ .host = h, .state = .relay });
-        try wanted.append(a, relayScript(s, h));
-    }
+    for (relay_hosts.items) |h| try outcomes.append(a, .{ .host = h, .state = .relay });
+    const hub = store.settings().relay_hub;
+    const wanted = try serviceScripts(a, hub, relay_hosts.items);
     for (previous.relay_scripts) |name| {
+        if (std.mem.eql(u8, name, hub)) continue;
         var keep = false;
-        for (wanted.items) |w| keep = keep or std.mem.eql(u8, w, name);
+        for (wanted) |w| keep = keep or std.mem.eql(u8, w, name);
         if (!keep) cf.deleteWorker(a, s.cloudflare_account, name) catch {};
     }
-    state.relay_scripts = wanted.items;
+    state.relay_scripts = wanted;
     state.hosts = outcomes.items;
     save(store, state);
     return state;
@@ -475,7 +517,9 @@ pub fn disconnect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, sto
     if (client(a, gpa, io, key, store)) |c| {
         var cf = c;
         const s = store.settings();
-        for (load(store).relay_scripts) |name| cf.deleteWorker(a, s.cloudflare_account, name) catch {};
+        for (load(store).relay_scripts) |name| {
+            if (!std.mem.eql(u8, name, s.relay_hub)) cf.deleteWorker(a, s.cloudflare_account, name) catch {};
+        }
         if (s.relay_hub.len > 0) cf.deleteWorker(a, s.cloudflare_account, s.relay_hub) catch {};
         const zones = cf.zones(a) catch &.{};
         for (zones) |z| {
@@ -500,4 +544,17 @@ pub fn disconnect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, sto
     store.syncRoutes();
     var path = sys.Path.of(store.path("cloudflare.json")) catch return;
     sys.unlink(path.z()) catch {};
+}
+
+test "the hub is never one of the services' Workers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const got = try serviceScripts(arena.allocator(), "pocketharbor-02f48b", &.{
+        "shop-web-02f48b.abdou-11d.workers.dev",
+        "pocketharbor-02f48b.abdou-11d.workers.dev",
+        "api-02f48b.abdou-11d.workers.dev",
+    });
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("shop-web-02f48b", got[0]);
+    try std.testing.expectEqualStrings("api-02f48b", got[1]);
 }

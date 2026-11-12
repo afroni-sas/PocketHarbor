@@ -214,6 +214,46 @@ async function setSaasZone(e) {
   }
 }
 
+async function setGeneratedZone(e) {
+  e.preventDefault()
+  const zone = e.currentTarget.elements.zone.value
+  starting.value = true
+  try {
+    await patch('/cloudflare', { generated_zone: zone })
+    toast(zone ? `Generate Domain now gives names in ${zone}` : 'Generate Domain now gives names on workers.dev', 'success')
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    starting.value = false
+    await load('networking')
+  }
+}
+
+function GeneratedZone({ cf }) {
+  const zones = (cf.state && cf.state.zones) || []
+  return (
+    <div class="cf-saas">
+      <b>Generated domains</b>
+      <p class="muted small">
+        Where Generate Domain puts a service's name. In one of your zones, it goes through the tunnel, with no request limit. On workers.dev it goes through PocketHarbor's relay and needs no domain, but Cloudflare's free plan allows 100,000 requests a day.
+      </p>
+      <form class="row" onSubmit={setGeneratedZone}>
+        <select class="select" name="zone" defaultValue={cf.generated_zone} key={cf.generated_zone} style="flex:1" aria-label="Where generated domains go">
+          <option value="">workers.dev, through the relay (100,000 requests a day)</option>
+          {zones.map((z) => (
+            <option key={z} value={z}>
+              {z}, through the tunnel (no request limit)
+            </option>
+          ))}
+        </select>
+        <button class="btn" disabled={starting.value}>
+          Save
+        </button>
+      </form>
+    </div>
+  )
+}
+
 function SaasZone({ cf }) {
   const st = cf.state || {}
   const zones = st.zones || []
@@ -349,6 +389,7 @@ function CloudflareCard() {
               ))}
             </div>
           )}
+          <GeneratedZone cf={cf} />
           <SaasZone cf={cf} />
         </>
       ) : (

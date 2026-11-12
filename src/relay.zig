@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 /// What PocketHarbor uploads to Cloudflare.
 pub const worker_js = @embedFile("relay/worker.js");
 
-pub const Kind = enum(u8) { head = 1, body = 2, end = 3, res_head = 4, res_body = 5, res_end = 6, abort = 7, _ };
+pub const Kind = enum(u8) { head = 1, body = 2, end = 3, res_head = 4, res_body = 5, res_end = 6, abort = 7, ws_open = 8, ws_text = 9, ws_binary = 10, ws_close = 11, _ };
 
 /// The largest piece of body in one frame; Cloudflare caps a WebSocket
 /// message at 1 MiB.
@@ -200,6 +200,9 @@ const Session = struct {
     alive: std.atomic.Value(bool) = .init(true),
     refs: std.atomic.Value(u32) = .init(1),
     proxy_port: u16,
+    /// Visitors' WebSockets, by request id, bridged to their services.
+    bridges: std.AutoHashMapUnmanaged(u32, *Bridge) = .empty,
+    bridges_lock: std.Io.Mutex = .init,
 
     fn retain(s: *Session) void {
         _ = s.refs.fetchAdd(1, .monotonic);
@@ -211,6 +214,7 @@ const Session = struct {
         s.conn.closing = true;
         s.client.connection_pool.release(s.conn, s.io);
         s.client.deinit();
+        s.bridges.deinit(s.gpa);
         s.gpa.destroy(s);
     }
 
@@ -473,6 +477,236 @@ fn run(job: *Job, a: Allocator, scratch: []u8) !void {
     try s.sendFrame(scratch, .res_end, job.id, "");
 }
 
+// WebSockets -----------------------------------------------------------------------
+
+/// The upgrade as the local proxy receives it. The phone speaks WebSocket to
+/// the service itself, so the key and the extensions are its own.
+pub fn upgradeHead(a: Allocator, head: Head, host: []const u8, key: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(a, "GET {s} HTTP/1.1\r\nHost: {s}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {s}\r\nSec-WebSocket-Version: 13\r\n", .{ head.path, host, key });
+    for (head.headers) |h| {
+        if (hopByHop(h[0]) or std.ascii.startsWithIgnoreCase(h[0], "sec-websocket-") and !std.ascii.eqlIgnoreCase(h[0], "sec-websocket-protocol")) continue;
+        if (std.ascii.eqlIgnoreCase(h[0], "x-forwarded-for") or std.ascii.eqlIgnoreCase(h[0], "x-forwarded-proto")) continue;
+        if (std.mem.indexOfAny(u8, h[0], "\r\n") != null or std.mem.indexOfAny(u8, h[1], "\r\n") != null) continue;
+        try out.print(a, "{s}: {s}\r\n", .{ h[0], h[1] });
+    }
+    if (head.ip.len > 0) try out.print(a, "X-Forwarded-For: {s}\r\n", .{head.ip});
+    try out.appendSlice(a, "X-Forwarded-Proto: https\r\n\r\n");
+    return out.items;
+}
+
+/// A visitor's WebSocket, as a client connection from the phone to its service.
+const Bridge = struct {
+    fd: i32,
+    write_lock: std.Io.Mutex = .init,
+
+    /// Sends a client frame to the service: masked, as clients must.
+    fn toService(b: *Bridge, io: std.Io, opcode: Opcode, payload: []const u8) !void {
+        b.write_lock.lockUncancelable(io);
+        defer b.write_lock.unlock(io);
+        var head: [14]u8 = undefined;
+        head[0] = 0x80 | @as(u8, @intFromEnum(opcode));
+        var n: usize = 2;
+        if (payload.len < 126) {
+            head[1] = 0x80 | @as(u8, @intCast(payload.len));
+        } else if (payload.len <= 0xffff) {
+            head[1] = 0x80 | 126;
+            std.mem.writeInt(u16, head[2..4], @intCast(payload.len), .big);
+            n = 4;
+        } else {
+            head[1] = 0x80 | 127;
+            std.mem.writeInt(u64, head[2..10], payload.len, .big);
+            n = 10;
+        }
+        var mask: [4]u8 = undefined;
+        io.random(&mask);
+        @memcpy(head[n..][0..4], &mask);
+        n += 4;
+        try sys.writeAll(b.fd, head[0..n]);
+        var buf: [4096]u8 = undefined;
+        var at: usize = 0;
+        while (at < payload.len) {
+            const len = @min(buf.len, payload.len - at);
+            for (0..len) |k| buf[k] = payload[at + k] ^ mask[(at + k) % 4];
+            try sys.writeAll(b.fd, buf[0..len]);
+            at += len;
+        }
+    }
+};
+
+/// Reads the service's frames: unmasked, possibly in pieces.
+const FrameReader = struct {
+    fd: i32,
+    buf: []u8,
+    start: usize = 0,
+    end: usize = 0,
+
+    fn fill(r: *FrameReader, want: usize) !void {
+        if (r.end - r.start >= want) return;
+        if (r.start > 0) {
+            std.mem.copyForwards(u8, r.buf, r.buf[r.start..r.end]);
+            r.end -= r.start;
+            r.start = 0;
+        }
+        if (want > r.buf.len) return error.TooLarge;
+        while (r.end < want) {
+            const n = try sys.read(r.fd, r.buf[r.end..]);
+            if (n == 0) return error.Closed;
+            r.end += n;
+        }
+    }
+
+    fn take(r: *FrameReader, n: usize) ![]u8 {
+        try r.fill(n);
+        const out = r.buf[r.start .. r.start + n];
+        r.start += n;
+        return out;
+    }
+};
+
+/// Cloudflare refuses WebSocket messages over 1 MiB.
+const max_message = 1 << 20;
+
+fn bridge(job: *Job) void {
+    defer {
+        job.session.release();
+        job.arena.deinit();
+        std.heap.smp_allocator.destroy(job);
+    }
+    const a = job.arena.allocator();
+    const s = job.session;
+    const scratch = a.alloc(u8, 5 + max_message + 16) catch return;
+    runBridge(job, a, scratch) catch |e| {
+        const why = std.fmt.allocPrint(a, "The phone could not reach the service: {s}", .{@errorName(e)}) catch "The phone could not reach the service";
+        s.sendFrame(scratch, .abort, job.id, why) catch {};
+    };
+}
+
+fn closeData(out: []u8, code: u16, reason: []const u8) []u8 {
+    std.mem.writeInt(u16, out[0..2], code, .big);
+    const n = @min(reason.len, out.len - 2);
+    @memcpy(out[2..][0..n], reason[0..n]);
+    return out[0 .. 2 + n];
+}
+
+fn runBridge(job: *Job, a: Allocator, scratch: []u8) !void {
+    const s = job.session;
+    const host = job.head.host orelse return error.NoHost;
+    const fd = try connectProxy(s.proxy_port);
+    defer sys.close(fd);
+    var key_raw: [16]u8 = undefined;
+    s.io.random(&key_raw);
+    var key: [24]u8 = undefined;
+    _ = std.base64.standard.Encoder.encode(&key, &key_raw);
+    try sys.writeAll(fd, try upgradeHead(a, job.head, host, &key));
+
+    var reader: FrameReader = .{ .fd = fd, .buf = try a.alloc(u8, max_message + 64) };
+    const end = while (true) {
+        if (reader.end == reader.buf.len) return error.HeadersTooLarge;
+        const n = try sys.read(fd, reader.buf[reader.end..]);
+        if (n == 0) return error.NoResponse;
+        reader.end += n;
+        if (std.mem.indexOf(u8, reader.buf[0..reader.end], "\r\n\r\n")) |i| break i + 4;
+    };
+    const head = try parseResponseHead(a, reader.buf[0..end]);
+    try s.sendFrame(scratch, .res_head, job.id, try std.json.Stringify.valueAlloc(a, .{ .status = head.status, .headers = head.headers }, .{}));
+    if (head.status != 101) {
+        // Refused: the visitor gets the service's answer as it is.
+        var out: BodyOut = .{ .session = s, .id = job.id, .scratch = scratch };
+        if (reader.end > end) try out.put(reader.buf[end..reader.end]);
+        while (true) {
+            if (head.length) |l| if (out.sent >= l) break;
+            const n = sys.read(fd, reader.buf) catch break;
+            if (n == 0) break;
+            try out.put(reader.buf[0..n]);
+        }
+        try s.sendFrame(scratch, .res_end, job.id, "");
+        return;
+    }
+    reader.start = end;
+    // A quiet WebSocket is not a dead one.
+    const none = linux.timeval{ .sec = 0, .usec = 0 };
+    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVTIMEO, @ptrCast(&none), @sizeOf(linux.timeval));
+
+    var b: Bridge = .{ .fd = fd };
+    {
+        s.bridges_lock.lockUncancelable(s.io);
+        defer s.bridges_lock.unlock(s.io);
+        try s.bridges.put(s.gpa, job.id, &b);
+    }
+    defer {
+        s.bridges_lock.lockUncancelable(s.io);
+        _ = s.bridges.remove(job.id);
+        s.bridges_lock.unlock(s.io);
+    }
+
+    var message: std.ArrayList(u8) = .empty;
+    var first: Opcode = .text;
+    var close_buf: [125]u8 = undefined;
+    while (true) {
+        const hdr = reader.take(2) catch {
+            s.sendFrame(scratch, .ws_close, job.id, closeData(&close_buf, 1001, "the service went away")) catch {};
+            return;
+        };
+        const fin = hdr[0] & 0x80 != 0;
+        const opcode: Opcode = @enumFromInt(@as(u4, @truncate(hdr[0])));
+        const masked = hdr[1] & 0x80 != 0;
+        var len: u64 = hdr[1] & 0x7f;
+        if (len == 126) len = std.mem.readInt(u16, (try reader.take(2))[0..2], .big) else if (len == 127) len = std.mem.readInt(u64, (try reader.take(8))[0..8], .big);
+        if (len > max_message) {
+            s.sendFrame(scratch, .ws_close, job.id, closeData(&close_buf, 1009, "message too large for the relay")) catch {};
+            return;
+        }
+        var mask: [4]u8 = .{ 0, 0, 0, 0 };
+        if (masked) @memcpy(&mask, (try reader.take(4))[0..4]);
+        const payload = try reader.take(@intCast(len));
+        if (masked) for (payload, 0..) |*ch, k| {
+            ch.* ^= mask[k % 4];
+        };
+        switch (opcode) {
+            .ping => b.toService(s.io, .pong, payload) catch return,
+            .pong => {},
+            .close => {
+                s.sendFrame(scratch, .ws_close, job.id, payload) catch {};
+                b.toService(s.io, .close, payload[0..@min(payload.len, 2)]) catch {};
+                return;
+            },
+            .text, .binary, .continuation => {
+                if (opcode != .continuation) {
+                    first = opcode;
+                    message.clearRetainingCapacity();
+                }
+                if (message.items.len + payload.len > max_message) {
+                    s.sendFrame(scratch, .ws_close, job.id, closeData(&close_buf, 1009, "message too large for the relay")) catch {};
+                    return;
+                }
+                try message.appendSlice(a, payload);
+                if (fin) {
+                    try s.sendFrame(scratch, if (first == .text) .ws_text else .ws_binary, job.id, message.items);
+                    message.clearRetainingCapacity();
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+/// A visitor's message or close, for the service it is bridged to.
+fn toBridge(s: *Session, id: u32, kind: Kind, data: []const u8) void {
+    s.bridges_lock.lockUncancelable(s.io);
+    defer s.bridges_lock.unlock(s.io);
+    const b = s.bridges.get(id) orelse return;
+    switch (kind) {
+        .ws_text => b.toService(s.io, .text, data) catch {},
+        .ws_binary => b.toService(s.io, .binary, data) catch {},
+        .ws_close => {
+            b.toService(s.io, .close, data[0..@min(data.len, 2)]) catch {};
+            _ = linux.shutdown(b.fd, linux.SHUT.RDWR);
+        },
+        else => {},
+    }
+}
+
 // The loop -----------------------------------------------------------------------
 
 const Building = struct { head: Head, body: std.ArrayList(u8), arena: std.heap.ArenaAllocator };
@@ -519,6 +753,24 @@ fn serve(s: *Session) !void {
                 try building.put(gpa, f.id, b);
             },
             .body => if (building.get(f.id)) |b| try b.body.appendSlice(b.arena.allocator(), f.data),
+            .ws_open => {
+                const job = try std.heap.smp_allocator.create(Job);
+                job.* = .{ .session = s, .id = f.id, .head = undefined, .body = &.{}, .arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator) };
+                job.head = std.json.parseFromSliceLeaky(Head, job.arena.allocator(), f.data, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+                    job.arena.deinit();
+                    std.heap.smp_allocator.destroy(job);
+                    continue;
+                };
+                s.retain();
+                const thread = std.Thread.spawn(.{ .stack_size = 512 * 1024 }, bridge, .{job}) catch {
+                    s.release();
+                    job.arena.deinit();
+                    std.heap.smp_allocator.destroy(job);
+                    continue;
+                };
+                thread.detach();
+            },
+            .ws_text, .ws_binary, .ws_close => toBridge(s, f.id, f.kind, f.data),
             .end => if (building.fetchRemove(f.id)) |kv| {
                 const b = kv.value;
                 defer gpa.destroy(b);
@@ -557,6 +809,13 @@ pub fn loop(gpa: Allocator, io: std.Io, ctx: anytype, comptime config: fn (@Type
             if (std.Thread.spawn(.{ .stack_size = 256 * 1024 }, keepalive, .{s})) |th| th.detach() else |_| s.release();
             serve(s) catch |e| sys.eprint("relay: connection lost ({s})\n", .{@errorName(e)});
             s.alive.store(false, .release);
+            {
+                // Their visitors are gone with the relay's connection.
+                s.bridges_lock.lockUncancelable(s.io);
+                defer s.bridges_lock.unlock(s.io);
+                var it = s.bridges.valueIterator();
+                while (it.next()) |b| _ = linux.shutdown(b.*.fd, linux.SHUT.RDWR);
+            }
             s.release();
         } else |e| {
             sys.eprint("relay: cannot connect to {s} ({s})\n", .{ c.url, @errorName(e) });
@@ -621,6 +880,22 @@ test "a chunked response goes back decoded, without its length" {
     for (wire) |ch| try d.feed(&.{ch}, sink, Sink.put);
     try t.expect(d.finished());
     try t.expectEqualStrings("hello, world", body.items);
+}
+
+test "the upgrade carries the visitor's protocol but the phone's own key" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const head: Head = .{
+        .method = "GET",
+        .path = "/socket",
+        .headers = &.{ .{ "Sec-WebSocket-Key", "visitor-key" }, .{ "Sec-WebSocket-Protocol", "chat" }, .{ "Sec-WebSocket-Extensions", "permessage-deflate" }, .{ "Upgrade", "websocket" }, .{ "Origin", "https://web.example" } },
+        .ip = "203.0.113.7",
+    };
+    const text = try upgradeHead(arena.allocator(), head, "web.example", "phone-key");
+    try t.expectEqualStrings(
+        "GET /socket HTTP/1.1\r\nHost: web.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: phone-key\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat\r\nOrigin: https://web.example\r\nX-Forwarded-For: 203.0.113.7\r\nX-Forwarded-Proto: https\r\n\r\n",
+        text,
+    );
 }
 
 test "relay addresses" {

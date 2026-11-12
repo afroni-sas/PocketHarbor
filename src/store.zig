@@ -72,6 +72,11 @@ pub const Service = struct {
     asleep: bool = false,
     deployment: u32 = 0,
     deployed_at: i64 = 0,
+    /// A random id that names what the service gets outside, such as its
+    /// relay Worker, instead of its name: made on first use, never changed.
+    uid: []const u8 = "",
+    /// The one name Generate Domain gave it; empty for none.
+    generated_domain: []const u8 = "",
 };
 
 /// One attempt to ship a version of a service.
@@ -127,6 +132,10 @@ pub const Settings = struct {
     relay_subdomain: []const u8 = "",
     relay_hub: []const u8 = "",
     relay_version: []const u8 = "",
+    /// Where Generate Domain puts names: a zone of the account, through the
+    /// tunnel, with no request limit; empty for workers.dev, through the
+    /// relay, which the Workers free plan limits to 100,000 requests a day.
+    generated_zone: []const u8 = "",
 };
 
 /// Names end up in hostnames and file paths.

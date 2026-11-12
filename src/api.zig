@@ -350,6 +350,7 @@ const ServiceView = struct {
     status: []const u8,
     deployment: u32,
     deployed_at: i64,
+    generated_domain: []const u8,
     x: i32,
     y: i32,
 };
@@ -404,6 +405,7 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .status = status,
         .deployment = svc.deployment,
         .deployed_at = svc.deployed_at,
+        .generated_domain = svc.generated_domain,
         .x = svc.x,
         .y = svc.y,
     };
@@ -460,7 +462,8 @@ fn domainsView(c: *Ctx, svc: Service) !void {
         try names.append(c.a, .{ name, try std.fmt.allocPrint(c.a, "*.{s}", .{s.base_domain}) });
     }
     for (names.items, 0..) |pair, i| {
-        const kind: []const u8 = if (i < svc.domains.len) "custom" else "base";
+        const generated = i < svc.domains.len and (std.ascii.eqlIgnoreCase(pair[0], svc.generated_domain) or edge.isRelayHost(s, pair[0]));
+        const kind: []const u8 = if (generated) "generated" else if (i < svc.domains.len) "custom" else "base";
         var view: View = .{ .domain = pair[0], .kind = kind, .records = try domains.records(c.a, pair[1], reach), .zone = domains.split(pair[1]).zone };
         if (managed) {
             if (edge.outcomeOf(state, pair[1])) |o| {
@@ -516,6 +519,7 @@ fn domainsView(c: *Ctx, svc: Service) !void {
     return c.res.json(200, .{
         .managed = managed,
         .relay_ready = managed and s.relay_url.len > 0,
+        .generates_in = if (managed) s.generated_zone else "",
         .relay_error = state.relay_error,
         .saas_zone = s.cloudflare_saas_zone,
         .synced_at = state.synced_at,
@@ -641,6 +645,7 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             .create_url = create_url,
             .connector = if (edge.connected(c.store)) connectorState(c) else "",
             .saas_zone = s.cloudflare_saas_zone,
+            .generated_zone = s.generated_zone,
             .relay = .{
                 .ready = s.relay_url.len > 0,
                 .dashboard = if (edge.isRelayHost(s, s.panel_domain)) s.panel_domain else "",
@@ -663,17 +668,21 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
     }
     if (seg.len == 0 and method(c, "PATCH")) {
         if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");
-        const body = c.req.json(struct { saas_zone: []const u8 }) catch return c.res.fail(400, "send saas_zone");
-        if (body.saas_zone.len > 0) {
+        const body = c.req.json(struct { saas_zone: ?[]const u8 = null, generated_zone: ?[]const u8 = null }) catch return c.res.fail(400, "send saas_zone or generated_zone");
+        const zones = edge.load(c.store).zones;
+        for ([_]?[]const u8{ body.saas_zone, body.generated_zone }) |maybe| {
+            const z = maybe orelse continue;
+            if (z.len == 0) continue;
             var known = false;
-            for (edge.load(c.store).zones) |z| known = known or eql(z, body.saas_zone);
+            for (zones) |name| known = known or eql(name, z);
             if (!known) return c.res.fail(400, "that is not one of the account's zones");
         }
         {
             const lock = try c.store.lock();
             defer c.store.unlock(lock);
             var s = c.store.settings();
-            s.cloudflare_saas_zone = body.saas_zone;
+            if (body.saas_zone) |z| s.cloudflare_saas_zone = z;
+            if (body.generated_zone) |z| s.generated_zone = z;
             try c.store.saveSettings(s);
         }
         const state = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch |e|
@@ -858,6 +867,10 @@ fn applyInput(svc: *Service, in: ServiceInput) !void {
     if (in.domains) |v| {
         for (v) |d| if (!store_mod.validDomain(d)) return error.BadDomain;
         svc.domains = v;
+        // Removing the generated name lets Generate Domain make another.
+        var kept = false;
+        for (v) |d| kept = kept or std.ascii.eqlIgnoreCase(d, svc.generated_domain);
+        if (!kept) svc.generated_domain = "";
     }
 
     if (in.health_path) |v| {
@@ -1002,8 +1015,10 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
     if (eql(what, "generate-domain") and method(c, "POST")) {
         if (!edge.connected(c.store)) return c.res.fail(409, "connect Cloudflare first, in Settings > Public access");
         var failure: edge.Failure = .{ .err = error.None, .message = "" };
-        const host = edge.generateDomain(c.a, c.a, c.panel.io, c.panel.key, c.store, id, &failure) catch |e|
+        const host = edge.generateDomain(c.a, c.a, c.panel.io, c.panel.key, c.store, id, &failure) catch |e| {
+            if (e == error.AlreadyGenerated) return c.res.fail(409, "this service already has its generated domain: remove it to make another");
             return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
+        };
         syncEdge(c);
         return c.res.json(200, .{ .domain = host });
     }
