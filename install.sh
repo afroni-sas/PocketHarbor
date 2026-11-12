@@ -789,7 +789,9 @@ main() {
         case "$PLATFORM" in
             termux)
                 PH install --listen "$BIND:$PORT" >/dev/null
-                ok "starts at boot (open the Termux:Boot app once so that Android allows it)"
+                # The engine's daemon revives services that Android killed.
+                PD daemon install >/dev/null 2>&1 || true
+                ok "starts at boot with the engine's daemon (open the Termux:Boot app once so that Android allows it)"
                 ;;
             linux)
                 if [ "$(id -u)" = 0 ]; then
@@ -824,6 +826,11 @@ main() {
             i=$((i + 1))
         done
         proxy_pid >/dev/null || die "PocketHarbor did not start; try: PHARBOR_ROOT=$DATA $INSTALL_DIR/pharbor serve"
+        # Under Termux, Android kills background processes: the daemon brings
+        # the services back, and keeps the CPU awake for them.
+        if [ "$PLATFORM" = termux ]; then
+            PD daemon -d >/dev/null 2>&1 || true
+        fi
         if answers "$PORT"; then
             ok "running on $BIND:$PORT"
         else
