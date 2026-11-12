@@ -123,10 +123,15 @@ export function showDnsRecords(svcId, domain) {
                 {ready ? '; the domain works.' : '. Cloudflare usually takes a few seconds to a few minutes to serve it.'}
               </p>
             ) : info.managed && d.record === 'no_zone' ? (
-              <p>
-                <span class="zone">{d.zone}</span> is not one of your Cloudflare zones
-                {info.zones.length > 0 ? ` (${info.zones.join(', ')})` : ''}. Add it to Cloudflare, free, and PocketHarbor writes the record itself; or add it at your DNS provider if its DNS stays there, knowing that only names on Cloudflare go through the tunnel.
-              </p>
+              <>
+                <p>
+                  <span class="mono">{d.domain}</span> belongs to <span class="zone">{d.zone}</span>, which is not in your Cloudflare account
+                  {info.zones.length > 0 ? ` (yours: ${info.zones.join(', ')})` : ''}. Cloudflare only sends a name through a tunnel when its zone is in the tunnel's own account, so no DNS record can bring this one to the phone.
+                </p>
+                <p class="muted small">
+                  Use a name under one of your zones (Generate Domain proposes one), or add a domain you own to your Cloudflare account, free, and press Check again.
+                </p>
+              </>
             ) : info.managed && d.record === 'conflict' ? (
               <p>
                 {d.record_detail.charAt(0).toUpperCase() + d.record_detail.slice(1)}. PocketHarbor does not overwrite a record it did not write: delete it in Cloudflare, then press Check again.
@@ -155,7 +160,7 @@ export function showDnsRecords(svcId, domain) {
                 .
               </p>
             )}
-            {d.records.length > 0 && (
+            {d.records.length > 0 && !(info.managed && d.record === 'no_zone') && (
               <div class="dns-table" role="table">
                 <div class="dns-row head" role="row">
                   <span role="columnheader">Type</span>
