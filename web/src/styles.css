@@ -388,6 +388,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .cf-connector.green { color: var(--green); }
 .cf-connector.yellow { color: var(--yellow); }
 .cf-connector .btn { margin-left: auto; }
+.cf-saas { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.cf-saas > b { font-size: 13.5px; }
+.cf-saas > p { margin: 4px 0 10px; line-height: 1.5; }
 .cf-connect { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
 @media (max-width: 640px) { .cf-connect { grid-template-columns: 1fr; } }
 .cf-steps { margin: 0 0 12px; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--gray-700); line-height: 1.5; }

@@ -67,7 +67,14 @@ export function cleanDomain(text) {
 }
 
 /** What the sub-line says after the port, and whether the row warns. */
+/** "_cf-custom-hostname.app.example.org" in the zone "example.org" → "_cf-custom-hostname.app". */
+function relative(name, zone) {
+  if (!zone || name === zone) return '@'
+  return name.endsWith(`.${zone}`) ? name.slice(0, -zone.length - 1) : name
+}
+
 function stateOf(d, info) {
+  if (d.record === 'foreign') return d.foreign_active || d.status === 'active' ? { text: '', warn: false } : { text: 'Waiting for DNS update', warn: true }
   if (d.record === 'no_zone') return { text: 'Not in your Cloudflare zones', warn: true }
   if (d.record === 'conflict') return { text: 'Another DNS record holds this name', warn: true }
   if (d.record === 'failed') return { text: 'Cloudflare did not write the record', warn: true }
@@ -122,6 +129,16 @@ export function showDnsRecords(svcId, domain) {
                 PocketHarbor added this record to <span class="zone">{d.zone}</span> in your Cloudflare account
                 {ready ? '; the domain works.' : '. Cloudflare usually takes a few seconds to a few minutes to serve it.'}
               </p>
+            ) : info.managed && d.record === 'foreign' ? (
+              <p>
+                {ready || d.foreign_active ? 'These records are in place: ' : 'Add the following DNS records to '}
+                <span class="zone">{d.zone}</span>
+                {ready || d.foreign_active
+                  ? ', and Cloudflare serves the name through your tunnel.'
+                  : ', wherever its DNS is managed: another Cloudflare account, a free subdomain service, any provider. Cloudflare then issues the certificate and sends the name through your tunnel, usually a few minutes after the records appear.'}
+              </p>
+            ) : info.managed && d.record === 'failed' && info.saas_zone ? (
+              <p>{d.record_detail.charAt(0).toUpperCase() + d.record_detail.slice(1)}.</p>
             ) : info.managed && d.record === 'no_zone' ? (
               <>
                 <p>
@@ -129,7 +146,17 @@ export function showDnsRecords(svcId, domain) {
                   {info.zones.length > 0 ? ` (yours: ${info.zones.join(', ')})` : ''}. Cloudflare only sends a name through a tunnel when its zone is in the tunnel's own account, so no DNS record can bring this one to the phone.
                 </p>
                 <p class="muted small">
-                  Use a name under one of your zones (Generate Domain proposes one), or add a domain you own to your Cloudflare account, free, and press Check again.
+                  To use it anyway, with records added where its DNS is, choose a zone for such domains in{' '}
+                  <button
+                    class="linkish"
+                    onClick={() => {
+                      closeOverlay()
+                      navigate('/settings?tab=networking')
+                    }}
+                  >
+                    Settings › Public access
+                  </button>
+                  . Or use a name under one of your zones: Generate Domain proposes one.
                 </p>
               </>
             ) : info.managed && d.record === 'conflict' ? (
@@ -170,11 +197,11 @@ export function showDnsRecords(svcId, domain) {
                 {d.records.map((r) => (
                   <div class="dns-row" role="row" key={r.type + r.name}>
                     <span class="dns-type" role="cell">
-                      {ready || managed ? <Check class="ok" width={14} height={14} /> : <TriangleAlert class="warn" width={14} height={14} />}
+                      {ready || managed || d.foreign_active ? <Check class="ok" width={14} height={14} /> : <TriangleAlert class="warn" width={14} height={14} />}
                       {r.type}
                     </span>
                     <span role="cell">
-                      <CopyCell text={r.name} />
+                      <CopyCell text={d.record === 'foreign' ? relative(r.name, d.zone) : r.name} />
                     </span>
                     <span role="cell">
                       <CopyCell text={r.value} />
@@ -434,7 +461,10 @@ function CustomForm({ svc, update }) {
   } else if (c && c.owner) {
     hint = `Already used by ${c.owner}`
     error = true
-  } else if (c && c.managed && !c.zone) hint = 'Available; not in your Cloudflare zones, so its DNS is yours to set'
+  } else if (c && c.managed && !c.zone && c.saas) {
+    hint = 'Available; its DNS stays where it is: PocketHarbor shows the two records to add there'
+    ok = true
+  } else if (c && c.managed && !c.zone) hint = 'Not in your Cloudflare zones: choose a zone for outside domains in Settings › Public access'
   else if (c && !c.certificate) {
     hint = `Available, but Cloudflare's free certificate stops one level below ${c.zone}`
     error = true

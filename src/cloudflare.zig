@@ -12,8 +12,13 @@ pub const api_root = "https://api.cloudflare.com/client/v4";
 /// The comment on every DNS record PocketHarbor writes.
 pub const record_comment = "Managed by PocketHarbor";
 
-/// A token made with these permissions is all it takes.
-pub const token_permissions = "Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read";
+/// A token made with these permissions is all it takes. The last one is for
+/// domains whose DNS is elsewhere (Cloudflare for SaaS).
+pub const token_permissions = "Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read, Zone: SSL and Certificates: Edit";
+
+/// The name, in the zone chosen for them, that domains whose DNS is
+/// elsewhere point at: Cloudflare's "fallback origin".
+pub const origin_label = "pharbor-origin";
 
 pub const Account = struct { id: []const u8, name: []const u8 = "" };
 pub const Zone = struct { id: []const u8, name: []const u8, status: []const u8 = "", account: struct { id: []const u8 = "" } = .{} };
@@ -27,6 +32,25 @@ pub const DnsRecord = struct {
     comment: ?[]const u8 = null,
 };
 pub const Rule = struct { hostname: ?[]const u8 = null, service: []const u8 };
+
+/// A name of someone else's DNS that a zone of this account serves
+/// (Cloudflare for SaaS).
+pub const CustomHostname = struct {
+    id: []const u8 = "",
+    hostname: []const u8 = "",
+    /// "active" once Cloudflare saw the name point here.
+    status: []const u8 = "",
+    ssl: struct {
+        status: []const u8 = "",
+        validation_errors: []const struct { message: []const u8 = "" } = &.{},
+    } = .{},
+    ownership_verification: struct { name: []const u8 = "", type: []const u8 = "", value: []const u8 = "" } = .{},
+    verification_errors: []const []const u8 = &.{},
+
+    pub fn active(self: CustomHostname) bool {
+        return std.mem.eql(u8, self.status, "active") and std.mem.eql(u8, self.ssl.status, "active");
+    }
+};
 
 pub const Error = error{
     /// The token is wrong, expired or lacks a permission; `Client.message` says which.
@@ -183,6 +207,31 @@ pub const Client = struct {
         return self.call(a, DnsRecord, .POST, path, body);
     }
 
+    /// Where Cloudflare sends the custom hostnames of a zone.
+    pub fn setFallbackOrigin(self: *Client, a: Allocator, zone: []const u8, origin: []const u8) !void {
+        const path = try std.fmt.allocPrint(a, "/zones/{s}/custom_hostnames/fallback_origin", .{zone});
+        const body = try std.json.Stringify.valueAlloc(a, .{ .origin = origin }, .{});
+        _ = try self.call(a, std.json.Value, .PUT, path, body);
+    }
+
+    pub fn customHostnames(self: *Client, a: Allocator, zone: []const u8) ![]const CustomHostname {
+        const path = try std.fmt.allocPrint(a, "/zones/{s}/custom_hostnames?per_page=50", .{zone});
+        return self.call(a, []const CustomHostname, .GET, path, null);
+    }
+
+    /// The certificate is validated over HTTP, which renews by itself once
+    /// the name's CNAME points here.
+    pub fn createCustomHostname(self: *Client, a: Allocator, zone: []const u8, hostname: []const u8) !CustomHostname {
+        const path = try std.fmt.allocPrint(a, "/zones/{s}/custom_hostnames", .{zone});
+        const body = try std.json.Stringify.valueAlloc(a, .{ .hostname = hostname, .ssl = .{ .method = "http", .type = "dv" } }, .{});
+        return self.call(a, CustomHostname, .POST, path, body);
+    }
+
+    pub fn deleteCustomHostname(self: *Client, a: Allocator, zone: []const u8, id: []const u8) !void {
+        const path = try std.fmt.allocPrint(a, "/zones/{s}/custom_hostnames/{s}", .{ zone, id });
+        _ = try self.call(a, std.json.Value, .DELETE, path, null);
+    }
+
     pub fn deleteRecord(self: *Client, a: Allocator, zone: []const u8, id: []const u8) !void {
         const path = try std.fmt.allocPrint(a, "/zones/{s}/dns_records/{s}", .{ zone, id });
         _ = try self.call(a, std.json.Value, .DELETE, path, null);
@@ -235,6 +284,9 @@ pub fn certificateCovers(zone: []const u8, host: []const u8) bool {
 
 /// What a name's DNS is like, before or after a sync.
 pub const RecordState = enum {
+    /// Its DNS is elsewhere: the records in `Outcome.records` go there, and
+    /// a zone of the account serves it (Cloudflare for SaaS).
+    foreign,
     /// PocketHarbor wrote it, or it already pointed at the tunnel.
     ready,
     /// Another record holds the name; PocketHarbor leaves it alone.
@@ -250,7 +302,22 @@ pub const Outcome = struct {
     state: RecordState,
     zone: []const u8 = "",
     detail: []const u8 = "",
+    /// For a foreign name: the records to add where its DNS is.
+    records: []const DnsRecord = &.{},
+    /// For a foreign name: whether Cloudflare serves it yet.
+    active: bool = false,
 };
+
+/// What the owner of a foreign name adds to its DNS: a CNAME to the fallback
+/// origin, and the TXT record that proves the name is theirs.
+pub fn foreignRecords(a: Allocator, host: []const u8, origin: []const u8, ch: CustomHostname) ![]const DnsRecord {
+    var out: std.ArrayList(DnsRecord) = .empty;
+    try out.append(a, .{ .type = "CNAME", .name = host, .content = origin });
+    if (ch.ownership_verification.name.len > 0) {
+        try out.append(a, .{ .type = "TXT", .name = ch.ownership_verification.name, .content = ch.ownership_verification.value });
+    }
+    return out.items;
+}
 
 /// The CNAME record that sends `host` into tunnel `id`.
 pub fn tunnelRecord(a: Allocator, host: []const u8, id: []const u8) !DnsRecord {
@@ -336,6 +403,20 @@ test "a sync writes what is missing and removes only its own records" {
     try t.expectEqualStrings("r2", p.remove[0].id);
     try t.expectEqual(@as(usize, 1), p.conflicts.len);
     try t.expectEqualStrings("r3", p.conflicts[0].id);
+}
+
+test "a foreign name needs a CNAME and its ownership record" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ch: CustomHostname = .{ .hostname = "app.example.org", .ownership_verification = .{ .name = "_cf-custom-hostname.app.example.org", .type = "txt", .value = "1234-abcd" } };
+    const recs = try foreignRecords(a, "app.example.org", "pharbor-origin.mine.com", ch);
+    try t.expectEqual(@as(usize, 2), recs.len);
+    try t.expectEqualStrings("CNAME", recs[0].type);
+    try t.expectEqualStrings("pharbor-origin.mine.com", recs[0].content);
+    try t.expectEqualStrings("_cf-custom-hostname.app.example.org", recs[1].name);
+    try t.expect(!ch.active());
+    try t.expect((CustomHostname{ .status = "active", .ssl = .{ .status = "active" } }).active());
 }
 
 test "the routes end with Cloudflare's required catch-all" {
