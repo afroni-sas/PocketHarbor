@@ -251,16 +251,17 @@ async function recheck(svcId) {
   await loadDomains(svcId)
 }
 
-function removeDomain(svc, domain, update) {
+function removeDomain(svc, domain, update, generated) {
+  const what = generated ? 'generated domain' : 'custom domain'
   overlay.value = () => (
     <div class="backdrop" onMouseDown={(e) => e.target === e.currentTarget && closeOverlay()}>
-      <div class="modal" role="dialog" aria-label="Remove Custom Domain">
+      <div class="modal" role="dialog" aria-label={generated ? 'Remove Generated Domain' : 'Remove Custom Domain'}>
         <header>
-          <h3>Remove Custom Domain</h3>
+          <h3>{generated ? 'Remove Generated Domain' : 'Remove Custom Domain'}</h3>
         </header>
         <div class="body">
           <p style="margin:0">
-            Are you sure you want to remove the custom domain <b>{domain}</b>?
+            Are you sure you want to remove the {what} <b>{domain}</b>?{generated ? ' Generate Domain can then make another.' : ''}
           </p>
         </div>
         <footer>
@@ -289,7 +290,7 @@ function removeDomain(svc, domain, update) {
 
 function Row({ svc, d, info, update }) {
   const state = stateOf(d, info)
-  const custom = d.kind === 'custom'
+  const custom = d.kind === 'custom' || d.kind === 'generated'
   const editing = form.value === `edit:${d.domain}`
   const href = d.status === 'active' && d.via !== 'https' ? `http://${d.domain}${d.via.includes('port') ? `:${info.proxy_port}` : ''}` : `https://${d.domain}`
   return (
@@ -342,7 +343,7 @@ function Row({ svc, d, info, update }) {
             <Pencil />
           </button>
           {custom && (
-            <button class="btn ghost icon sm" aria-label={`Remove ${d.domain}`} title="Remove" onClick={() => removeDomain(svc, d.domain, update)}>
+            <button class="btn ghost icon sm" aria-label={`Remove ${d.domain}`} title="Remove" onClick={() => removeDomain(svc, d.domain, update, d.kind === 'generated')}>
               <Trash />
             </button>
           )}
@@ -609,52 +610,34 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
       </form>
     )
   }
-  const prefix = v.prefix.trim().toLowerCase()
-  const zone = v.zone || zones[0]
-  const domain = prefix ? cleanDomain(`${prefix}.${zone}`) : ''
-  const valid = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(prefix) && domain
+  // Cloudflare is connected, but neither the relay nor a zone for generated
+  // names is ready: say what is missing.
   return (
-    <form
-      class="net-form"
-      onSubmit={(e) => {
-        e.preventDefault()
-        if (valid) addDomain(svc, update, domain, portOf(v.port) || svc.port || 8080)
-      }}
-    >
+    <div class="net-form">
       <b>Generate Service Domain</b>
-      <div class="gen-name">
-        <input class="input" aria-label="Name" value={v.prefix} autofocus spellcheck={false} onInput={(e) => (draft.value = { ...draft.peek(), prefix: e.currentTarget.value, error: '' })} />
-        {zones.length > 1 ? (
-          <select class="select" aria-label="Zone" value={zone} onChange={(e) => (draft.value = { ...draft.peek(), zone: e.currentTarget.value })}>
-            {zones.map((z) => (
-              <option key={z} value={z}>
-                .{z}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span class="gen-zone">.{zone}</span>
-        )}
-      </div>
-      <label for="gen-port">Enter the port your app is listening on</label>
-      <input class="input" id="gen-port" type="number" min="1" max="65535" placeholder={String(svc.port || 8080)} value={v.port} onInput={(e) => (draft.value = { ...draft.peek(), port: e.currentTarget.value })} />
-      <Foot hint={v.error || (valid ? `PocketHarbor writes ${domain} in your Cloudflare account` : 'Choose your target port')} error={!!v.error}>
+      <Foot
+        hint={
+          info.relay_error
+            ? `The relay could not be deployed: ${info.relay_error}. Give the token Account › Workers Scripts › Edit and press Sync now, or choose a zone for generated domains in Settings › Public access.`
+            : 'Choose where generated domains go in Settings › Public access: one of your zones, or workers.dev.'
+        }
+        error
+      >
         <button type="button" class="btn sm" onClick={() => (form.value = '')}>
-          Cancel
-        </button>
-        <button class="btn primary sm" disabled={!valid || v.busy}>
-          {v.busy && <Spinner />} Generate Domain
+          Close
         </button>
       </Foot>
-    </form>
+    </div>
   )
 }
 
 /** Railway's Public Networking: the list, the forms and the two buttons. */
-export function PublicNetworking({ svc, update, quickTunnel, label, quick }) {
+export function PublicNetworking({ svc, update, quickTunnel, quick }) {
   const state = domainInfo.value
   const info = state.id === svc.id ? state.data : null
-  const list = info ? info.domains : null
+  // The generated name first, as on Railway.
+  const list = info ? [...info.domains.filter((d) => d.kind === 'generated'), ...info.domains.filter((d) => d.kind !== 'generated')] : null
+  const hasGenerated = !!(list && list.some((d) => d.kind === 'generated'))
   const open = form.value
   const any = (list && list.length > 0) || quick || svc.hostnames.includes('*')
   return (
@@ -704,9 +687,10 @@ export function PublicNetworking({ svc, update, quickTunnel, label, quick }) {
       <div class="net-buttons">
         <button
           class="btn sm"
-          disabled={open === 'generate'}
+          disabled={open === 'generate' || hasGenerated}
+          title={hasGenerated ? 'A service has one generated domain: remove it to make another' : undefined}
           onClick={() => {
-            draft.value = { domain: '', prefix: label, zone: '', port: '', error: '', busy: false }
+            draft.value = { domain: '', prefix: '', zone: '', port: '', error: '', busy: false }
             form.value = 'generate'
           }}
         >
