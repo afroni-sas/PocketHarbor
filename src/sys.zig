@@ -467,6 +467,33 @@ pub fn monoNs() i128 {
     return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
+/// Like monoNs, but it also counts the time the device spent asleep.
+pub fn bootNs() i128 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.BOOTTIME, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+/// Tells when the device slept: between two calls of `check`, the boot
+/// clock moved further than the monotonic one by more than `ns`.
+pub const SleepWatch = struct {
+    boot: i128,
+    mono: i128,
+
+    pub fn init() SleepWatch {
+        return .{ .boot = bootNs(), .mono = monoNs() };
+    }
+
+    pub fn check(self: *SleepWatch, ns: i128) bool {
+        const b = bootNs();
+        const m = monoNs();
+        const slept = (b - self.boot) - (m - self.mono) > ns;
+        self.boot = b;
+        self.mono = m;
+        return slept;
+    }
+};
+
 pub fn sleepMs(ms: u64) void {
     var req: linux.timespec = .{
         .sec = @intCast(ms / 1000),

@@ -199,10 +199,21 @@ const Session = struct {
     write_lock: std.Io.Mutex = .init,
     alive: std.atomic.Value(bool) = .init(true),
     refs: std.atomic.Value(u32) = .init(1),
+    /// When something last came from the relay, in monotonic milliseconds.
+    last_rx_ms: std.atomic.Value(i64) = .init(0),
     proxy_port: u16,
     /// Visitors' WebSockets, by request id, bridged to their services.
     bridges: std.AutoHashMapUnmanaged(u32, *Bridge) = .empty,
     bridges_lock: std.Io.Mutex = .init,
+
+    fn heard(s: *Session) void {
+        s.last_rx_ms.store(@intCast(@divFloor(sys.monoNs(), std.time.ns_per_ms)), .release);
+    }
+
+    /// Ends the connection from under its reader, which then reconnects.
+    fn drop(s: *Session) void {
+        _ = linux.shutdown(s.conn.stream_reader.stream.socket.handle, linux.SHUT.RDWR);
+    }
 
     fn retain(s: *Session) void {
         _ = s.refs.fetchAdd(1, .monotonic);
@@ -266,6 +277,7 @@ const Session = struct {
         var first: ?Opcode = null;
         while (true) {
             const b0 = try r.takeByte();
+            s.heard();
             const b1 = try r.takeByte();
             const fin = b0 & 0x80 != 0;
             const opcode: Opcode = @enumFromInt(@as(u4, @truncate(b0)));
@@ -711,14 +723,35 @@ fn toBridge(s: *Session, id: u32, kind: Kind, data: []const u8) void {
 
 const Building = struct { head: Head, body: std.ArrayList(u8), arena: std.heap.ArenaAllocator };
 
+/// Pings the relay every 25 seconds, which answers each ping. A connection
+/// that stopped answering, or that just went through a sleep of the device,
+/// is ended at once: such a socket can look open for a quarter of an hour
+/// while leading nowhere, with every visitor seeing an error meanwhile.
 fn keepalive(s: *Session) void {
     defer s.release();
+    var sleep = sys.SleepWatch.init();
+    var since_ping: u32 = 0;
     while (s.alive.load(.acquire)) {
-        var waited: u32 = 0;
-        while (waited < 25 and s.alive.load(.acquire)) : (waited += 1) sys.sleepMs(1000);
-        s.send(.text, "ping") catch return;
+        sys.sleepMs(1000);
+        if (sleep.check(5 * std.time.ns_per_s)) {
+            sys.print("relay: the device slept; reconnecting\n", .{});
+            return s.drop();
+        }
+        const now: i64 = @intCast(@divFloor(sys.monoNs(), std.time.ns_per_ms));
+        if (now - s.last_rx_ms.load(.acquire) > silence_ms) {
+            sys.print("relay: no answer for {d} seconds; reconnecting\n", .{silence_ms / 1000});
+            return s.drop();
+        }
+        since_ping += 1;
+        if (since_ping >= 25) {
+            since_ping = 0;
+            s.send(.text, "ping") catch return;
+        }
     }
 }
+
+/// Two pings without an answer, and some time for a slow network.
+const silence_ms = 70_000;
 
 /// Serves requests until the connection drops.
 fn serve(s: *Session) !void {
@@ -807,6 +840,7 @@ pub fn loop(gpa: Allocator, io: std.Io, ctx: anytype, comptime config: fn (@Type
         };
         if (open(gpa, io, c.url, c.secret, c.proxy_port)) |s| {
             sys.print("relay: connected to {s}\n", .{c.url});
+            s.heard();
             backoff_ms = 1000;
             unresolved = 0;
             s.retain();

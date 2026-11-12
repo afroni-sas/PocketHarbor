@@ -108,6 +108,8 @@ Once connected, the card shows the tunnel, the relay and your zones, with two ch
 
 PocketHarbor never touches a record it did not write, and **Disconnect** removes what it made.
 
+When the phone sleeps or its network changes, the tunnel and the relay come back by themselves within seconds of waking up. cloudflared runs over HTTP/2 (TCP), which reconnects on any network and where UDP is filtered.
+
 Without a Cloudflare account, **Without a Cloudflare account** offers a temporary `trycloudflare.com` address for one service, or a tunnel you made by hand.
 
 ## Custom domains

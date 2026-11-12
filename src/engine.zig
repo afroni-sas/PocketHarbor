@@ -180,6 +180,20 @@ pub const Engine = struct {
         return out.code == 0;
     }
 
+    pub fn restart(self: *Engine, name: []const u8) bool {
+        const out = self.output(&.{ "restart", name }) catch return false;
+        return out.code == 0;
+    }
+
+    /// The command a container runs, as it was created.
+    pub fn argvOf(self: *Engine, name: []const u8) ?[]const []const u8 {
+        const out = self.output(&.{ "inspect", name }) catch return null;
+        if (out.code != 0) return null;
+        const Doc = struct { config: struct { argv: []const []const u8 = &.{} } = .{} };
+        const doc = std.json.parseFromSliceLeaky(Doc, self.a, out.text, .{ .ignore_unknown_fields = true }) catch return null;
+        return doc.config.argv;
+    }
+
     pub fn stop(self: *Engine, name: []const u8, timeout_s: u32) void {
         const t = std.fmt.allocPrint(self.a, "{d}", .{timeout_s}) catch return;
         _ = self.output(&.{ "stop", "-t", t, name }) catch {};
