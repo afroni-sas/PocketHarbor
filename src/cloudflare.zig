@@ -17,6 +17,17 @@ pub const record_comment = "Managed by PocketHarbor";
 /// domains whose DNS is elsewhere (Cloudflare for SaaS).
 pub const token_permissions = "Account: Workers Scripts: Edit, Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read, Zone: SSL and Certificates: Edit";
 
+/// Cloudflare's token form, filled in with those permissions, on every
+/// account and zone: Continue, Create, and paste. A user token finds its
+/// account by itself.
+pub const token_url = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=" ++
+    "%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C" ++
+    "%7B%22key%22%3A%22argotunnel%22%2C%22type%22%3A%22edit%22%7D%2C" ++
+    "%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C" ++
+    "%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C" ++
+    "%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22edit%22%7D%5D" ++
+    "&accountId=*&zoneId=all&name=PocketHarbor";
+
 /// The name, in the zone chosen for them, that domains whose DNS is
 /// elsewhere point at: Cloudflare's "fallback origin".
 pub const origin_label = "pharbor-origin";

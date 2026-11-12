@@ -2,7 +2,7 @@
 // registries and the people who can sign in.
 
 import { effect, signal, untracked } from '@preact/signals'
-import { Bell, Cloud, Copy, Eye, EyeOff, Plus, Server, Settings as SettingsIcon, Trash, Users } from 'lucide-preact'
+import { Bell, Cloud, Copy, ExternalLink, Eye, EyeOff, Plus, Server, Settings as SettingsIcon, Trash, Users } from 'lucide-preact'
 import { del, get, patch, post, put } from '../api.js'
 import { me, toast } from '../state.js'
 import { navigate, route, withQuery } from '../router.js'
@@ -153,16 +153,26 @@ function stopTunnel() {
   })
 }
 
+/** The token, and the Account ID if any, out of whatever was pasted: the
+ * token alone, or all that Cloudflare shows once it is made. */
+export function readCloudflarePaste(text) {
+  const word = text.trim()
+  const token =
+    (text.match(/cf[a-z]{2}_[A-Za-z0-9_-]{20,}/) || text.match(/(?<![\w-])[\w-]{40}(?![\w-])/) || [/^\S{20,}$/.test(word) ? word : ''])[0]
+  const account = (text.replace(token, '').match(/(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/i) || [''])[0]
+  return { token, account }
+}
+
 async function connectCloudflare(e) {
   e.preventDefault()
   const form = e.currentTarget
-  const token = form.elements.token.value.trim()
-  const account = form.elements.account.value.trim()
+  const { token, account } = readCloudflarePaste(form.elements.token.value)
+  if (!token) return toast('Paste the token that Cloudflare shows', 'error')
   starting.value = true
   try {
     await put('/cloudflare', { token, account })
     form.reset()
-    toast('Cloudflare connected; the tunnel is starting', 'success')
+    toast('Cloudflare connected', 'success')
     await load('networking')
   } catch (err) {
     toast(err.message, 'error')
@@ -175,20 +185,19 @@ async function syncCloudflare() {
   starting.value = true
   try {
     await post('/cloudflare/sync')
-    await load('networking')
-    toast('Cloudflare is up to date', 'success')
+    toast('Up to date', 'success')
   } catch (err) {
     toast(err.message, 'error')
-    await load('networking')
   } finally {
     starting.value = false
+    await load('networking')
   }
 }
 
 function disconnectCloudflare() {
   confirm({
     title: 'Disconnect Cloudflare?',
-    body: 'The DNS records PocketHarbor wrote are removed and its tunnel stops: your domains stop answering from the internet. Their services keep running.',
+    body: 'Your domains stop answering from the internet. The services keep running.',
     action: 'Disconnect',
     onConfirm: async () => {
       await del('/cloudflare')
@@ -197,93 +206,17 @@ function disconnectCloudflare() {
   })
 }
 
-const recordWords = { ready: 'Ready', conflict: 'Left alone', no_zone: 'No zone', failed: 'Failed', foreign: 'DNS elsewhere' }
-
-async function setSaasZone(e) {
-  e.preventDefault()
-  const zone = e.currentTarget.elements.zone.value
+async function saveChoice(body, done) {
   starting.value = true
   try {
-    await patch('/cloudflare', { saas_zone: zone })
-    toast(zone ? `${zone} now serves domains whose DNS is elsewhere` : 'Domains whose DNS is elsewhere are off', 'success')
+    await patch('/cloudflare', body)
+    toast(done, 'success')
   } catch (err) {
     toast(err.message, 'error')
   } finally {
     starting.value = false
     await load('networking')
   }
-}
-
-async function setGeneratedZone(e) {
-  e.preventDefault()
-  const zone = e.currentTarget.elements.zone.value
-  starting.value = true
-  try {
-    await patch('/cloudflare', { generated_zone: zone })
-    toast(zone ? `Generate Domain now gives names in ${zone}` : 'Generate Domain now gives names on workers.dev', 'success')
-  } catch (err) {
-    toast(err.message, 'error')
-  } finally {
-    starting.value = false
-    await load('networking')
-  }
-}
-
-function GeneratedZone({ cf }) {
-  const zones = (cf.state && cf.state.zones) || []
-  return (
-    <div class="cf-saas">
-      <b>Generated domains</b>
-      <p class="muted small">
-        Where Generate Domain puts a service's name. In one of your zones, it goes through the tunnel, with no request limit. On workers.dev it goes through PocketHarbor's relay and needs no domain, but Cloudflare's free plan allows 100,000 requests a day.
-      </p>
-      <form class="row" onSubmit={setGeneratedZone}>
-        <select class="select" name="zone" defaultValue={cf.generated_zone} key={cf.generated_zone} style="flex:1" aria-label="Where generated domains go">
-          <option value="">workers.dev, through the relay (100,000 requests a day)</option>
-          {zones.map((z) => (
-            <option key={z} value={z}>
-              {z}, through the tunnel (no request limit)
-            </option>
-          ))}
-        </select>
-        <button class="btn" disabled={starting.value}>
-          Save
-        </button>
-      </form>
-    </div>
-  )
-}
-
-function SaasZone({ cf }) {
-  const st = cf.state || {}
-  const zones = st.zones || []
-  if (zones.length === 0) return null
-  return (
-    <div class="cf-saas">
-      <b>Domains whose DNS is elsewhere</b>
-      <p class="muted small">
-        A domain in another Cloudflare account, at a free subdomain service or at any other provider works with two records added where its DNS is, as on Railway. One of your zones serves it, through Cloudflare for SaaS: turn it on for that zone in Cloudflare (SSL/TLS › Custom Hostnames › Enable; Cloudflare asks for payment details, and the first 100 names are free), and give the token <span class="mono">Zone › SSL and Certificates › Edit</span>.
-      </p>
-      <form class="row" onSubmit={setSaasZone}>
-        <select class="select" name="zone" defaultValue={cf.saas_zone} key={cf.saas_zone} style="flex:1" aria-label="Zone serving outside domains">
-          <option value="">Off</option>
-          {zones.map((z) => (
-            <option key={z} value={z}>
-              {z}
-            </option>
-          ))}
-        </select>
-        <button class="btn" disabled={starting.value}>
-          Save
-        </button>
-      </form>
-      {cf.saas_zone && st.origin && (
-        <p class="muted small" style="margin:6px 0 0">
-          Such domains point at <span class="mono">{st.origin}</span>.
-        </p>
-      )}
-    </div>
-  )
 }
 
 // While cloudflared starts, the card asks again every few seconds.
@@ -302,29 +235,12 @@ async function startConnector() {
   }
 }
 
-function ConnectorLine({ state }) {
-  watchConnector(state)
-  if (state === 'running') {
-    return (
-      <div class="cf-connector green">
-        <span class="dot green" /> The tunnel is connected to Cloudflare.
-      </div>
-    )
-  }
-  if (state === 'starting') {
-    return (
-      <div class="cf-connector">
-        <span class="spinner" style="width:12px;height:12px" /> Starting the tunnel. The first time, cloudflared is downloaded to the phone: a minute or two.
-      </div>
-    )
-  }
+function Check({ ok, wait, label, title }) {
   return (
-    <div class="cf-connector yellow">
-      <span class="dot yellow" /> The tunnel is not running: domains do not answer from the internet.
-      <button class="btn sm" onClick={startConnector}>
-        Start it
-      </button>
-    </div>
+    <span class={`cf-check ${wait ? 'wait' : ok ? 'ok' : 'off'}`} title={title}>
+      {wait ? <span class="spinner" style="width:11px;height:11px" /> : <span class={`dot ${ok ? 'green' : 'yellow'}`} />}
+      {label}
+    </span>
   )
 }
 
@@ -333,94 +249,101 @@ function CloudflareCard() {
   if (!cf) return null
   const busy = starting.value
   const st = cf.state || {}
+  const zones = st.zones || []
+  if (!cf.connected) {
+    return (
+      <section class="card card-pad set-card">
+        <h3>Cloudflare</h3>
+        <p class="muted small" style="margin:-6px 0 14px">Your services on the internet, over HTTPS, with no port to open.</p>
+        <a class="btn primary" href={cf.create_url} target="_blank" rel="noreferrer">
+          Create the token on Cloudflare <ExternalLink />
+        </a>
+        <form class="cf-paste" onSubmit={connectCloudflare}>
+          <input class="input mono" name="token" type="password" placeholder="Paste the token here" required autocomplete="off" aria-label="Cloudflare token" />
+          <button class="btn" disabled={busy}>
+            {busy && <span class="spinner" style="width:13px;height:13px" />}
+            Connect
+          </button>
+        </form>
+        <p class="muted small" style="margin:8px 0 0">The permissions are filled in: Continue to summary, Create Token, then paste it here.</p>
+      </section>
+    )
+  }
+  watchConnector(cf.connector)
+  const problems = [cf.connector === 'stopped' && 'The tunnel is stopped.', st.error, cf.relay && !cf.relay.ready && cf.relay.error].filter(Boolean)
   return (
     <section class="card card-pad set-card">
-      <h3>Cloudflare</h3>
-      {cf.connected ? (
-        <>
-          <div class="domain-row">
-            <span class={`dot ${st.error ? 'yellow' : 'green'}`} />
-            <span style="flex:1">
-              Connected · tunnel <span class="mono">{cf.tunnel_id.slice(0, 8)}</span>
-              {st.synced_at ? ` · synced ${timeAgo(st.synced_at)}` : ''}
-            </span>
-            <button class="btn sm" onClick={syncCloudflare} disabled={busy}>
-              {busy && <span class="spinner" style="width:12px;height:12px" />} Sync now
+      <div class="cf-head">
+        <h3>Cloudflare</h3>
+        <span class="spacer" />
+        <button class="btn sm" onClick={syncCloudflare} disabled={busy} title={st.synced_at ? `Synced ${timeAgo(st.synced_at)}` : undefined}>
+          {busy && <span class="spinner" style="width:12px;height:12px" />} Sync
+        </button>
+        <button class="btn sm danger" onClick={disconnectCloudflare} disabled={busy}>
+          Disconnect
+        </button>
+      </div>
+      <div class="cf-checks">
+        <Check ok={cf.connector === 'running'} wait={cf.connector === 'starting'} label="Tunnel" title={cf.connector === 'starting' ? 'Starting: cloudflared is downloaded the first time' : undefined} />
+        <Check ok={cf.relay && cf.relay.ready} label="Relay" title="workers.dev addresses, with no domain" />
+        <Check ok={zones.length > 0} label={zones.length ? zones.join(', ') : 'No zone'} title="Your domains on Cloudflare" />
+      </div>
+      {cf.relay && cf.relay.dashboard && (
+        <div class="cf-line">
+          <span class="muted small">Dashboard</span>
+          <a class="mono small" href={`https://${cf.relay.dashboard}`} target="_blank" rel="noreferrer">
+            {cf.relay.dashboard}
+          </a>
+          <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(`https://${cf.relay.dashboard}`)}>
+            <Copy />
+          </button>
+        </div>
+      )}
+      {problems.map((p) => (
+        <div class="banner warn" key={p}>
+          {p}
+          {p === 'The tunnel is stopped.' && (
+            <button class="btn sm" onClick={startConnector}>
+              Start
             </button>
-            <button class="btn sm danger" onClick={disconnectCloudflare} disabled={busy}>
-              Disconnect
-            </button>
-          </div>
-          <ConnectorLine state={cf.connector} />
-          {cf.relay && cf.relay.ready && (
-            <div class="cf-connector green">
-              <span class="dot green" /> Relay ready: Generate Domain gives each service an address on workers.dev
-              {cf.relay.dashboard && (
-                <>
-                  , and this dashboard answers at{' '}
-                  <a class="mono" href={`https://${cf.relay.dashboard}`} target="_blank" rel="noreferrer">
-                    {cf.relay.dashboard}
-                  </a>
-                </>
-              )}
-              .
-            </div>
           )}
-          {cf.relay && !cf.relay.ready && cf.relay.error && (
-            <div class="banner warn">
-              The relay could not be deployed: {cf.relay.error}. Give the token Account › Workers Scripts › Edit, then press Sync now.
+        </div>
+      ))}
+      <label class="cf-line">
+        <span class="muted small" title="Where Generate Domain puts names">Generated domains</span>
+        <select class="select" value={cf.generated_zone} onChange={(e) => saveChoice({ generated_zone: e.currentTarget.value }, 'Saved')}>
+          <option value="">workers.dev · 100k requests a day</option>
+          {zones.map((z) => (
+            <option key={z} value={z}>
+              {z} · no limit
+            </option>
+          ))}
+        </select>
+      </label>
+      {zones.length > 0 && (
+        <label class="cf-line">
+          <span class="muted small" title="Domains in another account or at another provider: two records to add where their DNS is. Needs Cloudflare for SaaS on the zone.">Outside domains</span>
+          <select class="select" value={cf.saas_zone} onChange={(e) => saveChoice({ saas_zone: e.currentTarget.value }, 'Saved')}>
+            <option value="">Off</option>
+            {zones.map((z) => (
+              <option key={z} value={z}>
+                through {z}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {st.hosts && st.hosts.length > 0 && (
+        <details class="cf-details">
+          <summary class="muted small">{st.hosts.length} names</summary>
+          {st.hosts.map((h) => (
+            <div class="cf-host" key={h.host}>
+              <span class={`dot ${h.state === 'ready' || h.state === 'relay' || (h.state === 'foreign' && h.active) ? 'green' : 'yellow'}`} />
+              <span class="mono">{h.host}</span>
+              {h.detail && <span class="muted small cf-detail">{h.detail}</span>}
             </div>
-          )}
-          {st.error && <div class="banner warn">{st.error}</div>}
-          <p class="muted small" style="margin:8px 0 0">
-            {st.zones && st.zones.length
-              ? `Your zones: ${st.zones.join(', ')}. A custom domain under them gets its DNS record and its route through the tunnel by itself.`
-              : 'The token sees no zone yet: add a domain to your Cloudflare account, then press Sync now.'}
-          </p>
-          {st.hosts && st.hosts.length > 0 && (
-            <div class="cf-hosts">
-              {st.hosts.map((h) => (
-                <div class="cf-host" key={h.host}>
-                  <span class={`dot ${h.state === 'ready' || (h.state === 'foreign' && h.active) ? 'green' : 'yellow'}`} />
-                  <span class="mono">{h.host}</span>
-                  <span class="muted small">{h.state === 'foreign' ? (h.active ? 'Ready, DNS elsewhere' : 'Waiting for its records') : recordWords[h.state]}</span>
-                  {h.detail && <span class="muted small cf-detail">{h.detail}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-          <GeneratedZone cf={cf} />
-          <SaasZone cf={cf} />
-        </>
-      ) : (
-        <>
-          <p class="muted small" style="margin:-6px 0 12px">
-            Connect your Cloudflare account and PocketHarbor sets up everything itself: its tunnel, a route for each domain, and their DNS records. Domains then answer from the internet over HTTPS, with no port to open, even behind a carrier's network.
-          </p>
-          <ol class="cf-steps">
-            <li>
-              Open{' '}
-              <a href={cf.create_url} target="_blank" rel="noreferrer">
-                Cloudflare › My Profile › API Tokens
-              </a>
-              , Create Token, Create Custom Token.
-            </li>
-            <li>
-              Give it these permissions: <span class="mono">{cf.permissions}</span>.
-            </li>
-            <li>
-              Paste the token here, and for a token your account owns (it starts with <span class="mono">cfat_</span>), the Account ID shown with it or on the dashboard's Overview page. The token is stored encrypted on this phone.
-            </li>
-          </ol>
-          <form class="cf-connect" onSubmit={connectCloudflare}>
-            <input class="input mono" name="token" type="password" placeholder="Cloudflare API token" required autocomplete="off" aria-label="Cloudflare API token" />
-            <input class="input mono" name="account" placeholder="Account ID (for cfat_ tokens)" autocomplete="off" spellcheck={false} pattern="[0-9a-fA-F]{32}" title="32 hexadecimal characters" aria-label="Cloudflare Account ID" />
-            <button class="btn primary" disabled={busy}>
-              {busy && <span class="spinner" style="width:13px;height:13px" />}
-              Connect
-            </button>
-          </form>
-        </>
+          ))}
+        </details>
       )}
     </section>
   )
@@ -435,68 +358,49 @@ function Networking() {
     <>
       <CloudflareCard />
       {!managed && (
-        <>
-      <section class="card card-pad set-card">
-        <h3>Cloudflare tunnel</h3>
-        {tunnel.running ? (
-          <>
-            <div class="domain-row">
-              <span class="dot green" />
-              <span style="flex:1">{tunnel.status || 'Running'}</span>
+        <details class="card card-pad set-card cf-manual">
+          <summary>
+            <b>Without a Cloudflare account</b>
+          </summary>
+          <h4>Quick tunnel</h4>
+          <p class="muted small">A temporary trycloudflare.com address for one service.</p>
+          {tunnel.running && tunnel.url ? (
+            <div class="code-box">
+              <a href={tunnel.url} target="_blank" rel="noreferrer">
+                {tunnel.url}
+              </a>
+              <span class="spacer" />
+              <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(tunnel.url)}>
+                <Copy />
+              </button>
               <button class="btn sm danger" onClick={stopTunnel}>
                 Stop
               </button>
             </div>
-            {tunnel.url && (
-              <div class="code-box">
-                <a href={tunnel.url} target="_blank" rel="noreferrer">
-                  {tunnel.url}
-                </a>
-                <span class="spacer" />
-                <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(tunnel.url)}>
-                  <Copy />
-                </button>
-              </div>
-            )}
-          </>
-        ) : (
-          <p class="muted small" style="margin:0">
-            No tunnel is running. A tunnel makes services reachable from the internet without opening a port.
-          </p>
-        )}
-      </section>
-      <section class="card card-pad set-card">
-        <h3>Quick tunnel</h3>
-        <p class="muted small" style="margin:-6px 0 12px">A random trycloudflare.com address for one service. No account needed; the address changes on restart.</p>
-        <form class="row" onSubmit={quickTunnel}>
-          <select class="select" name="service" required style="flex:1" defaultValue={tunnel.default_service}>
-            {services.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.project} / {s.environment} / {s.name}
-              </option>
-            ))}
-          </select>
-          <button class="btn primary" disabled={busy || services.length === 0}>
-            {busy && <span class="spinner" style="width:13px;height:13px" />}
-            Start
-          </button>
-        </form>
-      </section>
-        </>
-      )}
-      {!managed && (
-      <section class="card card-pad set-card">
-        <h3>Tunnel token</h3>
-        <p class="muted small" style="margin:-6px 0 12px">
-          Your own domains through a tunnel of your Cloudflare account. Create it in Zero Trust, route its hostnames to http://localhost:{data.value.settings?.proxy_port || 8080}, then paste its token.
-        </p>
-        <form class="row" onSubmit={namedTunnel}>
-          <input class="input mono" name="token" type="password" placeholder="eyJhIjoi..." required autocomplete="off" style="flex:1" />
-          <button class="btn primary" disabled={busy}>
-            Start
-          </button>
-        </form>
-      </section>
+          ) : (
+            <form class="row" onSubmit={quickTunnel}>
+              <select class="select" name="service" required style="flex:1" defaultValue={tunnel.default_service}>
+                {services.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.project} / {s.environment} / {s.name}
+                  </option>
+                ))}
+              </select>
+              <button class="btn" disabled={busy || services.length === 0}>
+                {busy && <span class="spinner" style="width:13px;height:13px" />}
+                Start
+              </button>
+            </form>
+          )}
+          <h4>Tunnel made by hand</h4>
+          <p class="muted small">Its token, from Zero Trust › Networks › Tunnels. Point its hostnames at http://localhost:{data.value.settings?.proxy_port || 8080}.</p>
+          <form class="row" onSubmit={namedTunnel}>
+            <input class="input mono" name="token" type="password" placeholder="eyJhIjoi..." required autocomplete="off" style="flex:1" />
+            <button class="btn" disabled={busy}>
+              Start
+            </button>
+          </form>
+        </details>
       )}
     </>
   )

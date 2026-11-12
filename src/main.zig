@@ -1290,7 +1290,7 @@ fn cmdCloudflare(c: *Ctx, args: []const [:0]const u8) !void {
             } else die("unknown option \"{s}\" for cloudflare connect", .{args[i]});
         }
         const token = std.mem.trim(u8, try readSecretLine(c), " \r\n\t");
-        if (token.len < 20) die("give the API token on stdin", .{});
+        if (token.len < 20) die("give the API token on stdin. To make one, with the permissions filled in:\n{s}", .{cloudflare.token_url});
         const state = edge.connect(c.a, c.gpa, c.io, key, c.store, c.eng, token, account, &failure) catch |e|
             die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
         printEdge(state);

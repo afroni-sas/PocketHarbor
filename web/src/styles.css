@@ -384,6 +384,28 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .dns-copy:hover { background: var(--gray-100); }
 .dns-copy:hover svg { opacity: 1; }
 .badge.orange { background: hsl(25, 60%, 12%); color: hsl(25, 90%, 62%); border-color: hsl(25, 50%, 24%); }
+.cf-paste { display: flex; gap: 8px; margin-top: 12px; }
+.cf-paste .input { flex: 1; }
+.set-card a.btn svg { width: 14px; height: 14px; }
+.cf-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.cf-head h3 { margin: 0; }
+.cf-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 10px; font-size: 13px; }
+.cf-check { display: inline-flex; align-items: center; gap: 6px; color: var(--gray-700); }
+.cf-check.off { color: var(--yellow); }
+.cf-line { display: flex; align-items: center; gap: 10px; margin-top: 8px; min-height: 32px; }
+.cf-line > span:first-child { width: 130px; flex: none; }
+.cf-line .select { flex: 1; max-width: 360px; }
+.cf-line a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-details { margin-top: 12px; }
+.cf-details summary { cursor: pointer; }
+.cf-details .cf-host { padding: 6px 0; border: 0; }
+.cf-manual summary { cursor: pointer; display: flex; align-items: center; justify-content: space-between; list-style: none; }
+.cf-manual summary::-webkit-details-marker { display: none; }
+.cf-manual summary::after { content: ''; width: 7px; height: 7px; border: solid var(--gray-500); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); margin-right: 4px; transition: transform 0.15s; }
+.cf-manual[open] summary::after { transform: rotate(-135deg); }
+.cf-manual h4 { margin: 16px 0 2px; font-size: 13.5px; }
+.cf-manual p { margin: 0 0 8px; }
+.banner.warn .btn { margin-left: auto; }
 .cf-connector { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--gray-700); }
 .cf-connector.green { color: var(--green); }
 .cf-connector.yellow { color: var(--yellow); }
