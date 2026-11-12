@@ -179,7 +179,7 @@ pub fn upgrade(store: Store, eng: *Engine) void {
 /// Keeps cloudflared connected for good: an old tunnel is made again over
 /// HTTP/2, and when the device wakes up the connector starts again at once
 /// rather than waiting for its connections to be found dead.
-pub fn watch(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
+pub fn watch(root: []const u8, bin: [:0]const u8, envp: engine.Envp, env: *std.process.Environ.Map) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
     var sleep = sys.SleepWatch.init();
@@ -191,7 +191,17 @@ pub fn watch(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
         var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
         if (first) {
             first = false;
-            if (store.settings().tunnel_id.len > 0) upgrade(store, &eng);
+            // Started at boot beside PocketHarbor, the daemon may take a moment.
+            sys.sleepMs(5000);
+            if (store.settings().tunnel_id.len > 0) {
+                upgrade(store, &eng);
+                // Stopped with PocketHarbor or by a restart of the device;
+                // the engine's daemon, where it runs, sees to it.
+                if (!engine.daemonRunning(a, env)) if (eng.inspect(container)) |info| if (!info.alive()) {
+                    sys.print("tunnel: starting cloudflared again\n", .{});
+                    if (!eng.start(container)) sys.eprint("tunnel: cloudflared did not start\n", .{});
+                };
+            }
         }
         sys.sleepMs(2000);
         if (!sleep.check(10 * std.time.ns_per_s)) continue;

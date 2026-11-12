@@ -51,6 +51,23 @@ pub fn locate(a: Allocator, env: *std.process.Environ.Map) ![:0]const u8 {
     return error.EngineNotFound;
 }
 
+/// Whether the engine's daemon runs, as under Termux. It brings back the
+/// containers whose supervisor was killed, so nothing else may start them
+/// at the same time. Its data directory is found the way `pdock` finds it.
+pub fn daemonRunning(a: Allocator, env: *std.process.Environ.Map) bool {
+    const root = env.get("POCKETDOCK_ROOT") orelse blk: {
+        const home = env.get("HOME") orelse return false;
+        if (home.len <= 1) return false;
+        break :blk std.fmt.allocPrint(a, "{s}/.pocketdock", .{home}) catch return false;
+    };
+    const path = std.fmt.allocPrintSentinel(a, "{s}/daemon.lock", .{root}, 0) catch return false;
+    const fd = sys.open(path.ptr, sys.O_CLOEXEC, 0) catch return false;
+    defer sys.close(fd);
+    const LOCK_EX = 2;
+    const LOCK_NB = 4;
+    return linux.errno(linux.flock(fd, LOCK_EX | LOCK_NB)) == .AGAIN;
+}
+
 pub const Engine = struct {
     a: Allocator,
     bin: [:0]const u8,
@@ -183,6 +200,15 @@ pub const Engine = struct {
     pub fn restart(self: *Engine, name: []const u8) bool {
         const out = self.output(&.{ "restart", name }) catch return false;
         return out.code == 0;
+    }
+
+    /// The id of the image a container runs: the digest of its config.
+    pub fn imageIdOf(self: *Engine, name: []const u8) []const u8 {
+        const out = self.output(&.{ "inspect", name }) catch return "";
+        if (out.code != 0) return "";
+        const Doc = struct { config: struct { image_id: []const u8 = "" } = .{} };
+        const doc = std.json.parseFromSliceLeaky(Doc, self.a, out.text, .{ .ignore_unknown_fields = true }) catch return "";
+        return doc.config.image_id;
     }
 
     /// The command a container runs, as it was created.

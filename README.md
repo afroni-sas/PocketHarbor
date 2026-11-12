@@ -50,7 +50,7 @@ Then it installs `pharbor` and `pdock`, checks their SHA-256 sums, starts everyt
 sh install.sh --yes --email you@example.com --cloudflare-token TOKEN
 ```
 
-`sh install.sh --help` lists every option; pass them after `sh -s --` when the script comes from curl. Run the installer again to update: the data, the settings and the port stay.
+`sh install.sh --help` lists every option; pass them after `sh -s --` when the script comes from curl. Run the installer again to update: the data, the settings, the address and the port stay, and the services keep running while it updates.
 
 From a computer with adb, push the release files and run the installer with `--from`; the release notes show how. A shell started by adb cannot start PocketHarbor at boot; Termux can.
 
@@ -164,6 +164,7 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 | **Public access** | Through your Cloudflare account, set up by PocketHarbor: its tunnel for your domains, and its relay on Workers for `workers.dev` addresses. It works behind a carrier's NAT, with HTTPS, WebSockets and no open port. |
 | **Idle sleep** | A service nobody uses stops; the next request starts it and waits for it. |
 | **Metrics** | CPU, memory, volume size and HTTP traffic (requests, 5xx, response time, bytes) of every service, sampled every 30 seconds and kept for a week. |
+| **Image updates** | Every image service is checked against its registry every six hours. A newer build of the same tag, a later version in the same line, or a new major version shows on its card and in its settings, with an Update button; a major version of a database asks for a backup first. |
 | **Templates** | PostgreSQL 18, MySQL 9.7 LTS, MariaDB 12.3 LTS, Redis 8, MongoDB 9 (4.4 on processors older than ARMv8.2 or without AVX), an S3 bucket (Versity Gateway) and NATS 2.15 in one click, with a volume, a generated password and the variables other services reference, like `${{ postgres.DATABASE_URL }}`. |
 | **Database view** | The tables, keys or collections of PostgreSQL, MySQL, MariaDB, Redis and MongoDB services, editable in a grid, with raw queries run by the database's own client and statistics. |
 | **Alerts** | Discord, Slack, email (Resend) or signed webhooks for failed or finished deploys, crashes, failed cron runs and backups, and CPU, memory or volume thresholds. |

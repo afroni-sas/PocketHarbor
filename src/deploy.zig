@@ -746,6 +746,43 @@ pub fn wake(store: Store, eng: *Engine, id: []const u8) void {
     store.save(current) catch {};
 }
 
+/// Starts again, each on its own thread, the services whose containers
+/// stopped without being asked to: the device restarted, or an older
+/// install's systemd unit took them down with PocketHarbor. A sleeping
+/// service waits for its next request, and a task for its schedule. Where
+/// the engine's daemon runs, it does this itself.
+pub fn revive(root: []const u8, bin: [:0]const u8, envp: engine.Envp, env: *std.process.Environ.Map) void {
+    // Started at boot beside PocketHarbor, the daemon may take a moment.
+    sys.sleepMs(5000);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (engine.daemonRunning(a, env)) return;
+    const store: Store = .{ .a = a, .root = root };
+    var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
+    for (store.list() catch return) |svc| {
+        if (svc.container.len == 0 or svc.asleep or svc.cron.len > 0) continue;
+        const info = eng.inspect(svc.container) orelse continue;
+        if (info.alive()) continue;
+        const id = std.heap.smp_allocator.dupe(u8, store.idOf(svc)) catch continue;
+        sys.print("{s}: starting it again\n", .{id});
+        const thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, reviveOne, .{ root, bin, envp, id }) catch {
+            std.heap.smp_allocator.free(id);
+            continue;
+        };
+        thread.detach();
+    }
+}
+
+fn reviveOne(root: []const u8, bin: [:0]const u8, envp: engine.Envp, id: []const u8) void {
+    defer std.heap.smp_allocator.free(id);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
+    wake(.{ .a = a, .root = root }, &eng, id);
+}
+
 /// Stops an idle service. The route is updated last, so that a request
 /// arriving during the stop stays parked instead of hitting a dying process.
 pub fn sleep(store: Store, eng: *Engine, id: []const u8) void {

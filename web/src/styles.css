@@ -206,7 +206,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .svc .name { display: flex; align-items: center; gap: 12px; font-weight: 600; font-size: 16px; line-height: 24px; }
 .svc .name svg { width: 22px; height: 22px; flex: none; }
 .svc .sub { margin: 0 0 0 34px; font-size: 14px; line-height: 20px; color: hsl(32, 4%, 65%); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.svc .foot { margin-top: auto; }
+.svc .foot { margin-top: auto; display: flex; align-items: center; gap: 8px; }
 .svc .foot .status { font-size: 14px; gap: 8px; }
 .svc .vol { box-sizing: border-box; height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 24px; border-top: 1px solid var(--border); font-size: 14px; color: hsl(32, 4%, 65%); }
 .svc .vol svg { width: 16px; height: 16px; }
@@ -362,6 +362,13 @@ body.resizing iframe, body.resizing .canvas { pointer-events: none; }
 .domain-input .input { flex: 1 1 0; min-width: 80px; }
 .domain-input .select { flex: 1 1 0; min-width: 0; text-overflow: ellipsis; }
 .domain-dot { color: var(--gray-500); }
+.image-update { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.image-update.has { padding: 10px 12px; border: 1px solid hsl(37, 45%, 26%); border-radius: var(--radius); background: var(--primary-soft); }
+.upd-row { display: flex; align-items: center; gap: 8px; }
+.upd-row .small { flex: 1; min-width: 0; }
+.upd-row .dot { flex: none; background: var(--primary-fg); }
+.upd-row .dot.yellow { background: var(--yellow); }
+.card-update { margin-left: auto; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; color: var(--primary-fg); background: var(--primary-soft); border: 1px solid hsl(37, 45%, 26%); }
 .push-state { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; color: var(--gray-700); line-height: 1.45; }
 .push-state .dot { flex: none; margin-top: 6px; }
 .net-icon { width: 16px; height: 16px; flex: none; color: var(--muted); }
