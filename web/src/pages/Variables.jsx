@@ -6,6 +6,7 @@ import { Braces, ChevronDown, ChevronRight, Copy, CornerDownRight, EllipsisVerti
 import { get, patch, post } from '../api.js'
 import { toast } from '../state.js'
 import { copy, openForm, openMenu, Spinner } from '../ui.jsx'
+import { CodeField, CodeText } from '../code.jsx'
 
 /** What the editor shows: for which base path, the list and the warnings. */
 export const vars = signal({ base: '', list: null, resolved: null, warnings: [] })
@@ -56,7 +57,7 @@ function rawEditor(base, list, onChange) {
     render: () => (
       <>
         <p class="muted small" style="margin:0">One KEY=value per line, as in a .env file. Variables left out are removed.</p>
-        <textarea class="textarea" name="text" rows={14} spellcheck={false} defaultValue={text} autofocus />
+        <CodeField multiline mode="env" name="text" rows={14} defaultValue={text} autofocus />
       </>
     ),
     onSubmit: async ({ text: next }) => {
@@ -66,20 +67,6 @@ function rawEditor(base, list, onChange) {
       toast('Variables updated', 'success')
     },
   })
-}
-
-/** Colours ${{ references }} so they read as links between services. */
-function Value({ text }) {
-  const parts = text.split(/(\$\{\{[^}]*\}\})/g)
-  return parts.map((part, i) =>
-    part.startsWith('${{') ? (
-      <span key={i} class="ref">
-        {part}
-      </span>
-    ) : (
-      part
-    ),
-  )
 }
 
 function AddRow({ base, onChange }) {
@@ -93,7 +80,7 @@ function AddRow({ base, onChange }) {
   return (
     <form class="var-add" onSubmit={submit}>
       <input class="input mono" name="name" placeholder="VARIABLE_NAME" pattern={KEY} required autofocus spellcheck={false} />
-      <input class="input mono" name="value" placeholder="value or ${{ service.VARIABLE }}" spellcheck={false} />
+      <CodeField name="value" placeholder="value or ${{ service.VARIABLE }}" />
       <button class="btn primary sm">Add</button>
       <button type="button" class="btn ghost sm" onClick={() => (adding.value = false)}>
         Cancel
@@ -111,7 +98,7 @@ function EditRow({ base, v, onChange }) {
   return (
     <form class="var-add" onSubmit={submit}>
       <input class="input mono" value={v.name} disabled />
-      <input class="input mono" name="value" defaultValue={v.value} autofocus spellcheck={false} />
+      <CodeField name="value" defaultValue={v.value} autofocus />
       <button class="btn primary sm">Save</button>
       <button type="button" class="btn ghost sm" onClick={() => (editing.value = '')}>
         Cancel
@@ -144,7 +131,7 @@ function Row({ base, v, resolved, onChange }) {
         <span class={`val${open ? ' open' : ''}`} onClick={toggle} title={open ? 'Hide' : 'Show'}>
           {open ? (
             <>
-              <Value text={v.value} />
+              <CodeText text={v.value} />
               {final !== undefined && final !== v.value && <span class="muted"> → {final}</span>}
             </>
           ) : (

@@ -224,12 +224,12 @@ function Details({ svc }) {
   // The service's own variables first, then those PocketHarbor adds.
   const all = r.variables || []
   const vars = [...all.filter((v) => !v.name.startsWith('PHARBOR_')), ...all.filter((v) => v.name.startsWith('PHARBOR_'))]
-  const ok = d.status === 'active' || d.status === 'removed'
+  const ok = d.status === 'active' || d.status === 'removed' || d.status === 'completed'
   return (
     <div class="deploy-detail">
       <div class={`detail-state ${d.status === 'failed' ? 'red' : d.status === 'deploying' ? 'purple' : 'green'}`}>
         {d.status === 'failed' ? <CircleX /> : d.status === 'deploying' ? <span class="status-spin" /> : <CircleCheck />}
-        <span>{d.status === 'failed' ? `Deployment failed${d.reason ? `: ${d.reason}` : ''}` : d.status === 'deploying' ? 'Deploying' : ok ? 'Deployment successful' : d.status}</span>
+        <span>{d.status === 'failed' ? `Deployment failed${d.reason ? `: ${d.reason}` : ''}` : d.status === 'deploying' ? 'Deploying' : d.status === 'completed' ? 'Completed: the task ran and exited with code 0' : ok ? 'Deployment successful' : d.status}</span>
         <span class="spacer" />
         {d.finished_at > 0 && <span class="muted small">took {seconds(Math.max(1, d.finished_at - d.created_at))}</span>}
       </div>
@@ -306,7 +306,7 @@ function download(name, text) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
 
-const badges = { active: ['Active', 'green'], removed: ['Removed', 'gray'], failed: ['Failed', 'red'], deploying: ['Deploying', 'purple'] }
+const badges = { active: ['Active', 'green'], completed: ['Completed', 'green'], removed: ['Removed', 'gray'], failed: ['Failed', 'red'], deploying: ['Deploying', 'purple'] }
 
 export function LogsView({ svc }) {
   const p = page.value
@@ -319,7 +319,7 @@ export function LogsView({ svc }) {
   const close = () => setQuery({ logs: undefined, logtab: undefined })
   const menu = (e) =>
     openMenu(e.currentTarget, [
-      dep && dep.status === 'active' && ['Redeploy', RefreshCw, () => attempt(() => post(`/services/${enc(svc.id)}/redeploy`, { number: dep.number }).then(close), 'Redeploying')],
+      dep && (dep.status === 'active' || dep.status === 'completed') && ['Redeploy', RefreshCw, () => attempt(() => post(`/services/${enc(svc.id)}/redeploy`, { number: dep.number }).then(close), 'Redeploying')],
       dep && dep.status === 'removed' && ['Rollback to this deployment', Undo2, () => attempt(() => post(`/services/${enc(svc.id)}/rollback`, { number: dep.number }).then(close), 'Rolling back')],
       dep && dep.status === 'failed' && ['Retry', RefreshCw, () => attempt(() => post(`/services/${enc(svc.id)}/deploy`).then(close), 'Deploying')],
       ['Download this log', Download, () => (d.text ? download(`${svc.name}-${p.logs}-${tab}.log`, d.text) : toast('Nothing to download', 'info'))],

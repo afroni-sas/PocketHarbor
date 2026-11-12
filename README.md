@@ -156,6 +156,8 @@ cd web && pnpm install --frozen-lockfile && pnpm build
 | **Routing** | One proxy serves every service by hostname, exact names and `*.example.com`. HTTP and WebSocket. |
 | **Zero-downtime deploys** | The new version must open its port and pass its health check within the healthcheck timeout before traffic moves. The old one then drains and stops. A failed deployment leaves the running version alone. |
 | **Restart policy** | On Failure (10 tries, as on Railway), Always or Never. |
+| **Tasks** | A service that runs and exits with code 0, like migrations, is a completed deployment, as on Railway, not a failed one. |
+| **Railway variables** | References copied from Railway work as they are: `${{ db.RAILWAY_PRIVATE_DOMAIN }}` is `${{ db.PHARBOR_PRIVATE_DOMAIN }}`, and so on for the other built-in names. The variable editors colour keys, values, strings, comments and references. |
 | **Public access** | Through your Cloudflare account, set up by PocketHarbor: its tunnel for your domains, and its relay on Workers for `workers.dev` addresses. It works behind a carrier's NAT, with HTTPS, WebSockets and no open port. |
 | **Idle sleep** | A service nobody uses stops; the next request starts it and waits for it. |
 | **Metrics** | CPU, memory, volume size and HTTP traffic (requests, 5xx, response time, bytes) of every service, sampled every 30 seconds and kept for a week. |

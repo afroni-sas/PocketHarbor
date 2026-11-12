@@ -82,7 +82,8 @@ pub const Service = struct {
 /// One attempt to ship a version of a service.
 pub const Deployment = struct {
     number: u32,
-    /// "deploying", "active", "failed" or "removed".
+    /// "deploying", "active", "completed" (a task that ran and exited 0),
+    /// "failed" or "removed".
     status: []const u8 = "deploying",
     image: []const u8 = "",
     /// What asked for it: "cli", "api", "webhook", "redeploy" or "rollback".
@@ -95,6 +96,11 @@ pub const Deployment = struct {
     created_at: i64 = 0,
     finished_at: i64 = 0,
 };
+
+/// The deployment that is current: serving, or a task that completed.
+pub fn isCurrent(status: []const u8) bool {
+    return std.mem.eql(u8, status, "active") or std.mem.eql(u8, status, "completed");
+}
 
 pub const default_project = "default";
 pub const default_environment = "production";

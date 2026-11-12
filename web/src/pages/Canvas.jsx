@@ -699,7 +699,7 @@ function cardMenu(e, svc) {
   const go = (query) => openService(svc.name, query)
   const latest = svc.latest
   const items = []
-  if (latest) items.push(['Latest deploy', Rocket, () => go({ logs: latest.number, logtab: latest.status === 'active' ? 'deploy' : undefined })])
+  if (latest) items.push(['Latest deploy', Rocket, () => go({ logs: latest.number, logtab: latest.status === 'active' || latest.status === 'completed' ? 'deploy' : undefined })])
   items.push(
     ['View Variables', Braces, () => go({ tab: 'variables' })],
     ['View Metrics', ChartLine, () => go({ tab: 'metrics' })],

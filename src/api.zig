@@ -365,7 +365,7 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
     else if (svc.asleep)
         "asleep"
     else if (info) |i|
-        i.status
+        (if (std.mem.eql(u8, i.status, "exited") and i.exit_code == 0 and i.restarts == 0) "completed" else i.status)
     else if (svc.deployment > 0)
         "failed"
     else
@@ -1120,7 +1120,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         var number = body.number;
         if (number == null) {
             for (try c.store.listDeployments(id)) |d| {
-                if (eql(d.status, "active")) {
+                if (store_mod.isCurrent(d.status)) {
                     number = d.number;
                     break;
                 }

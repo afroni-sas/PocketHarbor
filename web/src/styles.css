@@ -38,6 +38,7 @@
   --blue: hsl(220, 80%, 65%);
   --blue-bg: hsl(220, 55%, 13%);
   --radius: 8px;
+  --term-bg: #141210;
   --mono: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: dark;
   font-family: 'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -553,6 +554,28 @@ body.resizing iframe, body.resizing .canvas { pointer-events: none; }
 .var-add { display: grid; grid-template-columns: minmax(140px, 38%) 1fr auto auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
 .var-add .input { height: 32px; }
 .ref { color: var(--primary-fg); background: var(--primary-soft); border-radius: 4px; padding: 0 3px; }
+/* Fields coloured as code: the text is drawn on a layer behind a field whose
+   own text is transparent; both share font, padding and line height. */
+.code-field { position: relative; min-width: 0; border-radius: 6px; background: var(--bg-2); }
+.code-field .code-input, .code-layer { font-family: var(--mono); font-size: 12.5px; letter-spacing: 0; tab-size: 2; }
+.code-field .code-input { position: relative; display: block; background: transparent; color: transparent; caret-color: var(--fg); }
+.code-field .code-input::selection { color: transparent; background: hsla(38, 70%, 55%, .32); }
+.code-field .code-input::placeholder { color: var(--gray-400); }
+.code-layer { position: absolute; inset: 0; margin: 0; padding: 0 10px; border: 1px solid transparent; line-height: 34px; white-space: pre; overflow: hidden; pointer-events: none; color: var(--gray-800); }
+.code-field.multi .code-input, .code-field.multi .code-layer { padding: 10px 12px; line-height: 1.65; white-space: pre; overflow-wrap: normal; }
+.code-field.multi .code-input { overflow: auto; min-height: 280px; }
+.code-text { font-family: var(--mono); }
+.tk-key { color: hsl(38, 72%, 66%); }
+.tk-op, .tk-dot { color: var(--gray-500); }
+.tk-kw { color: hsl(15, 58%, 66%); }
+.tk-str { color: hsl(95, 30%, 67%); }
+.tk-num { color: hsl(205, 48%, 72%); }
+.tk-comment { color: var(--gray-400); }
+.tk-bad { color: var(--red); text-decoration: underline wavy hsla(1, 62%, 60%, .6); text-underline-offset: 3px; }
+.tk-ref { background: var(--primary-soft); border-radius: 3px; box-shadow: 0 0 0 1px var(--primary-soft); }
+.tk-brace { color: hsl(37, 38%, 50%); }
+.tk-svc { color: hsl(38, 78%, 68%); }
+.tk-var { color: hsl(40, 55%, 82%); }
 .banner.warn { background: var(--yellow-bg); border-color: hsl(44, 50%, 22%); color: var(--yellow); }
 
 /* Logs extras */
@@ -647,8 +670,9 @@ pre.card { padding: 14px; }
 
 /* Console */
 .console-wrap { display: flex; flex-direction: column; }
-.console { height: calc(100vh - 260px); min-height: 280px; padding: 8px 4px 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: #13111c; overflow: hidden; }
-.console .xterm-viewport { scrollbar-width: thin; }
+.console { height: calc(100vh - 260px); min-height: 280px; padding: 10px 6px 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--term-bg); overflow: hidden; }
+.console .xterm, .console .xterm-viewport { background: var(--term-bg) !important; }
+.console .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--gray-300) transparent; }
 
 
 /* Alerts */

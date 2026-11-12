@@ -248,6 +248,7 @@ function source(svc, d) {
 const notes = { redeploy: 'redeploy', rollback: 'rollback', webhook: 'push' }
 
 function badgeOf(svc, d, active) {
+  if (active && d.status === 'completed') return { label: 'Completed', color: 'green' }
   if (active) return { label: 'Active', color: 'green' }
   if (d.status === 'deploying') return { label: svc.repo ? 'Building' : 'Deploying', color: 'purple', spin: true }
   if (d.status === 'failed') return { label: 'Failed', color: 'red' }
@@ -406,7 +407,7 @@ function Deployments({ svc }) {
     )
   }
   if (!list) return <div class="empty"><Spinner /></div>
-  const activeAt = list.findIndex((x) => x.status === 'active')
+  const activeAt = list.findIndex((x) => x.status === 'active' || x.status === 'completed')
   const split = activeAt >= 0 ? activeAt + 1 : Math.min(1, list.length)
   const top = list.slice(0, split)
   const history = list.slice(split)
@@ -435,7 +436,7 @@ function Deployments({ svc }) {
         </div>
       )}
       {top.map((x) => (
-        <DeployCard key={x.number} svc={svc} d={x} active={x.status === 'active'} />
+        <DeployCard key={x.number} svc={svc} d={x} active={x.status === 'active' || x.status === 'completed'} />
       ))}
       {history.length > 0 && (
         <>
