@@ -21,6 +21,8 @@
 #                           its password: PHARBOR_PASSWORD, asked, or generated
 #   --domain DOMAIN         every service at NAME.DOMAIN         PHARBOR_DOMAIN
 #   --panel-domain HOST     where the dashboard answers           PHARBOR_PANEL_DOMAIN
+#   --cloudflare-token T    connect Cloudflare: tunnel and DNS   PHARBOR_CLOUDFLARE_TOKEN
+#                           records are then set up by PocketHarbor
 #   --tunnel-token TOKEN    start a Cloudflare tunnel            PHARBOR_TUNNEL_TOKEN
 #   --boot, --no-boot       start at boot (Termux:Boot, systemd) PHARBOR_BOOT=1|0
 #   --no-start              install and set up, do not start     PHARBOR_START=0
@@ -52,6 +54,7 @@ PASSWORD=${PHARBOR_PASSWORD:-}
 DOMAIN=${PHARBOR_DOMAIN:-}
 PANEL_DOMAIN=${PHARBOR_PANEL_DOMAIN:-}
 TUNNEL_TOKEN=${PHARBOR_TUNNEL_TOKEN:-}
+CLOUDFLARE_TOKEN=${PHARBOR_CLOUDFLARE_TOKEN:-}
 BOOT=${PHARBOR_BOOT:-}
 START=${PHARBOR_START:-1}
 FROM=""
@@ -89,14 +92,17 @@ Installs and sets up PocketHarbor and PocketDock. Without --yes it asks.
                         PHARBOR_PASSWORD, is asked, or is generated
   --domain DOMAIN       every service also answers at NAME.DOMAIN
   --panel-domain HOST   where the dashboard answers
-  --tunnel-token TOKEN  start a Cloudflare tunnel
+  --cloudflare-token T  connect your Cloudflare account: PocketHarbor makes its
+                        tunnel and writes the DNS records of your domains
+  --tunnel-token TOKEN  start a Cloudflare tunnel made by hand instead
   --boot, --no-boot     start at boot (Termux:Boot or systemd)
   --no-start            install and set up, but do not start
   --from DIR            take the files from DIR instead of GitHub (adb push)
 
 Each option has a variable: PHARBOR_YES, PHARBOR_VERSION, PHARBOR_INSTALL_DIR,
 PHARBOR_ROOT, PHARBOR_PORT, PHARBOR_BIND, PHARBOR_EMAIL, PHARBOR_PASSWORD,
-PHARBOR_DOMAIN, PHARBOR_PANEL_DOMAIN, PHARBOR_TUNNEL_TOKEN, PHARBOR_BOOT,
+PHARBOR_DOMAIN, PHARBOR_PANEL_DOMAIN, PHARBOR_CLOUDFLARE_TOKEN,
+PHARBOR_TUNNEL_TOKEN, PHARBOR_BOOT,
 PHARBOR_START. A private repository is read with gh's token or GITHUB_TOKEN.
 
 To remove PocketHarbor: sh uninstall.sh (it keeps the data unless --purge).
@@ -562,6 +568,7 @@ main() {
             --domain) need "$@"; DOMAIN=$2; shift ;;
             --panel-domain) need "$@"; PANEL_DOMAIN=$2; shift ;;
             --tunnel-token) need "$@"; TUNNEL_TOKEN=$2; shift ;;
+            --cloudflare-token) need "$@"; CLOUDFLARE_TOKEN=$2; shift ;;
             --boot) BOOT=1 ;;
             --no-boot) BOOT=0 ;;
             --no-start) START=0 ;;
@@ -675,7 +682,17 @@ main() {
             say "${RED}\"$PANEL_DOMAIN\" is not a domain name, like harbor.example.com.$RESET"
             PANEL_DOMAIN=""
         done
-        if agree "Connect a Cloudflare tunnel now (needs its token)?" n; then
+        say "${DIM}With a Cloudflare API token, PocketHarbor makes its tunnel and writes the DNS records of your domains."
+        say "Create one at dash.cloudflare.com/profile/api-tokens with: Account: Cloudflare Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read.$RESET"
+        if [ -z "$CLOUDFLARE_TOKEN" ] && agree "Connect your Cloudflare account now?" n; then
+            while :; do
+                secret CLOUDFLARE_TOKEN "Cloudflare API token"
+                [ ${#CLOUDFLARE_TOKEN} -ge 20 ] && break
+                [ -n "$CLOUDFLARE_TOKEN" ] || break
+                say "${RED}That is too short for an API token; paste the whole token, or press Enter to skip.$RESET"
+            done
+        fi
+        if [ -z "$CLOUDFLARE_TOKEN" ] && agree "Or start a tunnel you made by hand (needs its token)?" n; then
             while :; do
                 secret TUNNEL_TOKEN "Tunnel token (Zero Trust > Networks > Tunnels > your tunnel)"
                 [ ${#TUNNEL_TOKEN} -ge 40 ] && break
@@ -830,11 +847,18 @@ main() {
             rm -f "$DATA/stopped-by-uninstall"
             [ $back = 0 ] || ok "started $back services again"
         fi
-        if [ -n "$TUNNEL_TOKEN" ]; then
+        if [ -n "$CLOUDFLARE_TOKEN" ]; then
+            if printf '%s\n' "$CLOUDFLARE_TOKEN" | PH cloudflare connect >"$WORK/cf" 2>&1; then
+                ok "Cloudflare connected: PocketHarbor sets up the tunnel and the DNS records"
+            else
+                say "${RED}Cloudflare was not connected:$RESET $(sed 's/^error: //' "$WORK/cf" | tail -n 1)"
+                say "Connect it later in Settings > Public access, or: pharbor cloudflare connect"
+            fi
+        elif [ -n "$TUNNEL_TOKEN" ]; then
             PH tunnel start "$TUNNEL_TOKEN" >/dev/null && ok "Cloudflare tunnel started" || say "The tunnel did not start; see: pharbor tunnel status"
         fi
-    elif [ -n "$TUNNEL_TOKEN" ]; then
-        say "Start it, then run: pharbor tunnel start TOKEN"
+    elif [ -n "$CLOUDFLARE_TOKEN" ] || [ -n "$TUNNEL_TOKEN" ]; then
+        say "Start it, then connect Cloudflare in Settings > Public access"
     fi
 
     step "Done"

@@ -13,7 +13,8 @@ const image = "cloudflare/cloudflared:latest";
 /// What the private network calls the phone's loopback (`--host-gateway`).
 const gateway = "10.88.0.1";
 
-fn originUrl(store: Store) ![]const u8 {
+/// Where a tunnel's public hostnames must point.
+pub fn originUrl(store: Store) ![]const u8 {
     return std.fmt.allocPrint(store.a, "http://{s}:{d}", .{ gateway, store.settings().proxy_port });
 }
 
@@ -29,6 +30,7 @@ fn findUrl(text: []const u8) ?[]const u8 {
 pub fn quick(store: Store, eng: *Engine, id: []const u8) !void {
     var s = store.settings();
     s.default_service = id;
+    s.tunnel_id = "";
     try store.saveSettings(s);
     store.syncRoutes();
 
@@ -92,14 +94,19 @@ pub fn named(store: Store, eng: *Engine, token: []const u8) !void {
     sys.print("Tunnel running. In the Cloudflare dashboard, point each public hostname at:\n  {s}\n", .{try originUrl(store)});
     if (tunnelId(a, token)) |id| {
         sys.print("For a domain hosted elsewhere, add a CNAME to:\n  {s}.cfargotunnel.com\n", .{id});
+        // The dashboard shows each custom domain the record it needs.
+        var s = store.settings();
+        s.tunnel_id = id;
+        store.saveSettings(s) catch {};
     }
 }
 
 pub fn stop(store: Store, eng: *Engine) void {
     eng.remove(container);
     var s = store.settings();
-    if (s.default_service.len > 0) {
+    if (s.default_service.len > 0 or s.tunnel_id.len > 0) {
         s.default_service = "";
+        s.tunnel_id = "";
         store.saveSettings(s) catch {};
         store.syncRoutes();
     }
