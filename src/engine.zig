@@ -185,6 +185,15 @@ pub const Engine = struct {
         return out.code == 0;
     }
 
+    /// The id of the image a container runs: the digest of its config.
+    pub fn imageIdOf(self: *Engine, name: []const u8) []const u8 {
+        const out = self.output(&.{ "inspect", name }) catch return "";
+        if (out.code != 0) return "";
+        const Doc = struct { config: struct { image_id: []const u8 = "" } = .{} };
+        const doc = std.json.parseFromSliceLeaky(Doc, self.a, out.text, .{ .ignore_unknown_fields = true }) catch return "";
+        return doc.config.image_id;
+    }
+
     /// The command a container runs, as it was created.
     pub fn argvOf(self: *Engine, name: []const u8) ?[]const []const u8 {
         const out = self.output(&.{ "inspect", name }) catch return null;

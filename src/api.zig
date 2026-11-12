@@ -12,6 +12,7 @@ const store_mod = @import("store.zig");
 const vars_mod = @import("vars.zig");
 const github = @import("github.zig");
 const hooks = @import("hooks.zig");
+const updates = @import("updates.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
@@ -335,6 +336,8 @@ const ServiceView = struct {
     auto_deploy: bool,
     /// Whether pushes reach the phone: the repository's webhook.
     deploy_on_push: ?hooks.Entry,
+    /// Something newer for its image, when the last check found it.
+    update: ?updates.Check,
     build_command: []const u8,
     start_command: []const u8,
     pre_deploy: []const u8,
@@ -391,6 +394,7 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .root_dir = svc.root_dir,
         .auto_deploy = svc.auto_deploy,
         .deploy_on_push = hooks.statusOf(c.store, svc),
+        .update = if (svc.image.len > 0) (if (updates.cached(c.store, svc.image, "")) |u| (if (u.available()) u else null) else null) else null,
         .build_command = svc.build_command,
         .start_command = svc.start_command,
         .pre_deploy = svc.pre_deploy,
@@ -1068,6 +1072,12 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         };
         syncEdge(c);
         return c.res.json(200, .{ .domain = host });
+    }
+    if (eql(what, "update") and method(c, "GET")) {
+        if (svc.image.len == 0) return c.res.fail(409, "this service is built from source: it updates with each push");
+        const local = if (svc.container.len > 0) c.eng.imageIdOf(svc.container) else "";
+        const force = c.req.param("refresh") != null;
+        return c.res.json(200, updates.check(c.a, c.a, c.panel.io, c.store, svc.image, local, force));
     }
     if (eql(what, "deploy") and method(c, "POST")) {
         if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");

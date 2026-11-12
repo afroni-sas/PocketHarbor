@@ -9,6 +9,7 @@ const routes = @import("routes.zig");
 const proxy = @import("proxy.zig");
 const deploy = @import("deploy.zig");
 const tunnel = @import("tunnel.zig");
+const updates = @import("updates.zig");
 const store_mod = @import("store.zig");
 const api = @import("api.zig");
 const httpd = @import("httpd.zig");
@@ -393,6 +394,8 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     thread.detach();
     const sampler = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, metrics.run, .{ c.store.root, c.eng.bin, c.envp, c.io, panel.key });
     sampler.detach();
+    const checker = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, updates.watch, .{ c.store.root, c.eng.bin, c.envp, c.io });
+    checker.detach();
     try httpd.serveOn(try panelListener(c, s.panel_port), api.handle, panel);
 }
 

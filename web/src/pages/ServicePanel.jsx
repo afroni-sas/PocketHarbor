@@ -685,6 +685,102 @@ function connect(svc, kind) {
   })
 }
 
+/** What the registry has that is newer than the service's image. */
+const imageCheck = signal({ id: '', image: '', data: null, loading: false })
+
+async function checkImage(svc, refresh) {
+  imageCheck.value = { id: svc.id, image: svc.image, data: refresh ? imageCheck.peek().data : null, loading: true }
+  try {
+    const data = await get(svcPath(svc, `/update${refresh ? '?refresh=1' : ''}`))
+    if (imageCheck.peek().id === svc.id) imageCheck.value = { id: svc.id, image: svc.image, data, loading: false }
+  } catch (err) {
+    if (imageCheck.peek().id === svc.id) imageCheck.value = { id: svc.id, image: svc.image, data: { error: err.message }, loading: false }
+  }
+}
+
+/** The tag of an image: "postgres:18-alpine" → "18-alpine". */
+const tagOf = (image) => {
+  const slash = image.lastIndexOf('/')
+  const colon = image.lastIndexOf(':')
+  return colon > slash ? image.slice(colon + 1) : 'latest'
+}
+
+function switchImage(svc, image, major) {
+  const kind = dbKind(svc)
+  const go = () => attempt(() => update(svc, { image, deploy: true }, true), `Deploying ${image}`)
+  if (!major) return go()
+  confirm({
+    title: 'Move to a new major version?',
+    body: kind
+      ? `${image} may not read the data the current version wrote: a database usually needs a dump and a restore, or its own upgrade tool, between major versions. Back the volume up first (Backups tab). The current deployment keeps running if the new one fails.`
+      : `${image} is a new major version, which may change how it behaves. The current deployment keeps running if the new one fails to start.`,
+    action: 'Deploy it',
+    danger: !!kind,
+    onConfirm: go,
+  })
+}
+
+function ImageUpdate({ svc }) {
+  const c = imageCheck.value
+  if (c.id !== svc.id || c.image !== svc.image) {
+    queueMicrotask(() => imageCheck.peek().id === svc.id && imageCheck.peek().image === svc.image ? null : checkImage(svc, false))
+    return null
+  }
+  const d = c.data
+  const again = (
+    <button class="linkish" onClick={() => checkImage(svc, true)} disabled={c.loading}>
+      {c.loading ? 'Checking…' : 'Check again'}
+    </button>
+  )
+  if (!d) return <div class="image-update muted small">Checking for a newer version…</div>
+  const any = d.build || d.newer || d.major
+  if (!any) {
+    return (
+      <div class="image-update muted small">
+        {d.error ? `Could not check for updates: ${d.error}` : `Up to date${d.checked_at ? ` · checked ${timeAgo(d.checked_at)}` : ''}`} · {again}
+      </div>
+    )
+  }
+  return (
+    <div class="image-update has">
+      {d.build && (
+        <div class="upd-row">
+          <span class="dot yellow" />
+          <span class="small">
+            A newer build of <span class="mono">{tagOf(svc.image)}</span> is out
+          </span>
+          <button class="btn sm" onClick={() => attempt(() => post(svcPath(svc, '/deploy')), 'Pulling the new build')}>
+            Update
+          </button>
+        </div>
+      )}
+      {d.newer && (
+        <div class="upd-row">
+          <span class="dot yellow" />
+          <span class="small">
+            <span class="mono">{tagOf(d.newer)}</span> is available
+          </span>
+          <button class="btn sm" onClick={() => switchImage(svc, d.newer, false)}>
+            Update
+          </button>
+        </div>
+      )}
+      {d.major && (
+        <div class="upd-row">
+          <span class="dot" />
+          <span class="small">
+            <span class="mono">{tagOf(d.major)}</span> · new major version
+          </span>
+          <button class="btn sm" onClick={() => switchImage(svc, d.major, true)}>
+            Update…
+          </button>
+        </div>
+      )}
+      <div class="muted small">Checked {timeAgo(d.checked_at)} · {again}</div>
+    </div>
+  )
+}
+
 const pushText = {
   ready: 'GitHub calls the phone on each push',
   needs_cloudflare: 'GitHub cannot reach the phone yet: connect Cloudflare',
@@ -886,6 +982,7 @@ function Settings({ svc }) {
                   </button>
                 </div>
               )}
+              {editingImage.value !== svc.id && <ImageUpdate svc={svc} />}
             </Group>
           ) : (
             <Group label="Source" hint="Where the service comes from." keys="repository image">

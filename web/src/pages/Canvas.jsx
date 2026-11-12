@@ -410,6 +410,11 @@ function Card({ node, selected, dragging }) {
         {host ? <div class="sub">{host}</div> : svc.hostnames.includes('*') ? <div class="sub">default service</div> : null}
         <div class="foot">
           <Status svc={svc} />
+          {svc.update && (
+            <span class="card-update" title={svc.update.newer || svc.update.major || 'A newer build of this image is out'}>
+              Update
+            </span>
+          )}
         </div>
       </div>
       {svc.volumes.map((v) => (

@@ -153,6 +153,7 @@ curl -s -H "Authorization: Bearer $PHARBOR_TOKEN" "$PHARBOR_URL/api/projects"
 - `generated_domain`.
 - `deploy_on_push`: `{repo, status, detail}`, where status is `ready`, `needs_cloudflare`, `needs_token`, `denied`, `failed` or `pending`.
 - `last_run`, for cron services.
+- `update`: what the last check of its image found, when something is newer (see `GET /api/services/:id/update`).
 
 ```bash
 # An nginx service, deployed at once
@@ -170,6 +171,7 @@ curl -s -X POST -H "Authorization: Bearer $PHARBOR_TOKEN" -H 'Content-Type: appl
 | POST | `/api/services/:id/rollback` | `{number}` | 202 `{from}`: deployment `number` again, with **its own** variables |
 | POST | `/api/services/:id/restart` | `{}` | Restarts the running container |
 | POST | `/api/services/:id/run` | `{}` | 202: runs a cron service now |
+| GET | `/api/services/:id/update` | `refresh=1` to ask the registry again | `{image, checked_at, build, newer, major, error}`. `build` means a newer build of the same tag exists, so deploying pulls it. `newer` is a later version in the same line (e.g. `mongo:9.1` for `mongo:9.0`). `major` is a new major version (e.g. `postgres:18-alpine` for `postgres:16-alpine`). Answers are kept for six hours. |
 | GET | `/api/services/:id/cron-log` | | The last runs' output (text) |
 
 ## Deployments
