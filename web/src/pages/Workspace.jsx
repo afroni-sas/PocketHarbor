@@ -410,6 +410,7 @@ const hookText = {
   needs_token: 'Needs a GitHub token',
   denied: 'The token may not add its webhook',
   failed: 'Not set up',
+  pending: 'Set up at the next sync',
 }
 
 function Github() {

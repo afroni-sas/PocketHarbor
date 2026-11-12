@@ -23,6 +23,8 @@ pub const Status = enum {
     denied,
     /// GitHub could not be reached, or refused for another reason.
     failed,
+    /// Everything is there, but no sync has set it up yet (an upgrade).
+    pending,
 };
 
 pub const Entry = struct {
@@ -156,7 +158,7 @@ pub fn statusOf(store: Store, svc: store_mod.Service) ?Entry {
     // Not synced yet: say what is missing.
     if (store.settings().github_token.len == 0) return .{ .repo = svc.repo, .status = .needs_token };
     if (!edge.connected(store)) return .{ .repo = svc.repo, .status = .needs_cloudflare };
-    return .{ .repo = svc.repo, .status = .failed, .detail = "not set up yet" };
+    return .{ .repo = svc.repo, .status = .pending };
 }
 
 test "the webhook target needs a public name" {

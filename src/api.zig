@@ -1753,6 +1753,10 @@ fn registries(c: *Ctx, seg: []const []const u8) !void {
 }
 
 fn githubSettings(c: *Ctx, seg: []const []const u8) !void {
+    if (seg.len == 1 and eql(seg[0], "sync") and method(c, "POST")) {
+        syncHooks(c);
+        return c.res.json(200, .{ .hooks = hooks.load(c.store).repos });
+    }
     if (seg.len == 1 and eql(seg[0], "repos") and method(c, "GET")) {
         const sealed = c.store.settings().github_token;
         if (sealed.len == 0) return c.res.json(200, .{ .has_token = false, .repos = &[_]github.Repo{}, .@"error" = "" });

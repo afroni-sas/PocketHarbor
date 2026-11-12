@@ -4,7 +4,7 @@ const Asset = @import("api.zig").Asset;
 pub const files = [_]Asset{
     .{ .path = "/apple-touch-icon.png", .type = "image/png", .body = @embedFile("web/apple-touch-icon.png") },
     .{ .path = "/assets/addon-fit-DIOBYJe3.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/addon-fit-DIOBYJe3.js") },
-    .{ .path = "/assets/index-2zbrVrTo.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-2zbrVrTo.js") },
+    .{ .path = "/assets/index-DTI8m6-F.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/index-DTI8m6-F.js") },
     .{ .path = "/assets/index-DUsuly9R.css", .type = "text/css; charset=utf-8", .body = @embedFile("web/assets/index-DUsuly9R.css") },
     .{ .path = "/assets/inter-latin-wght-normal-Dx4kXJAl.woff2", .type = "font/woff2", .body = @embedFile("web/assets/inter-latin-wght-normal-Dx4kXJAl.woff2") },
     .{ .path = "/assets/xterm-C8z0-R2m.js", .type = "text/javascript; charset=utf-8", .body = @embedFile("web/assets/xterm-C8z0-R2m.js") },

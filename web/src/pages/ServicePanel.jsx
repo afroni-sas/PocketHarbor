@@ -690,6 +690,21 @@ const pushText = {
   needs_token: 'Add a GitHub token, so that PocketHarbor adds the webhook',
   denied: 'The GitHub token may not add the webhook: give it Webhooks: Read and write',
   failed: 'The webhook is not set up',
+  pending: 'The webhook is not set up yet',
+}
+
+const settingUp = signal(false)
+
+async function setUpWebhook() {
+  settingUp.value = true
+  try {
+    await post('/github/sync')
+    await refresh()
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    settingUp.value = false
+  }
 }
 
 /** Whether pushes reach the phone, and the one thing to do when not. */
@@ -703,13 +718,22 @@ function PushState({ svc }) {
       <span class={`dot ${ok ? 'green' : 'yellow'}`} />
       <span class="small">
         {p.status === 'failed' && p.detail ? `The webhook is not set up: ${p.detail}` : pushText[p.status]}
-        {fix && (
+        {p.status === 'pending' ? (
           <>
             {' · '}
-            <button class="linkish" onClick={() => navigate(fix[1])}>
-              {fix[0]}
+            <button class="linkish" onClick={setUpWebhook} disabled={settingUp.value}>
+              {settingUp.value ? 'Setting up…' : 'Set up now'}
             </button>
           </>
+        ) : (
+          fix && (
+            <>
+              {' · '}
+              <button class="linkish" onClick={() => navigate(fix[1])}>
+                {fix[0]}
+              </button>
+            </>
+          )
         )}
       </span>
     </div>
