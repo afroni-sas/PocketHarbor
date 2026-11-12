@@ -7,7 +7,7 @@ import * as si from 'simple-icons'
 const wanted = [
   'siAlpinelinux', 'siCaddy', 'siGhost', 'siGitea', 'siGrafana', 'siMariadb', 'siMinio', 'siMongodb', 'siMysql',
   'siN8n', 'siNatsdotio', 'siNextcloud', 'siNginx', 'siNodedotjs', 'siPostgresql', 'siPython', 'siRabbitmq',
-  'siRedis', 'siTraefikproxy', 'siUptimekuma', 'siWordpress',
+  'siRedis', 'siTraefikproxy', 'siUptimekuma', 'siWordpress', 'siCloudflare',
 ]
 
 const lines = wanted.map((name) => {

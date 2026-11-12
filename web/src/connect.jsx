@@ -1,12 +1,63 @@
-// Connecting Cloudflare and GitHub in two steps: a button opens their token
-// form with every permission already filled in, and one field takes back
-// what they show. Used in Settings and wherever a feature needs them.
+// Connecting Cloudflare and GitHub: their own button, with their logo,
+// opens their token form with every permission already filled in; the
+// field to paste the token back then appears beside it.
 
 import { signal } from '@preact/signals'
-import { ExternalLink } from 'lucide-preact'
 import { put } from './api.js'
 import { toast } from './state.js'
-import { Spinner } from './ui.jsx'
+import { GithubIcon, Spinner } from './ui.jsx'
+import { siCloudflare } from './brands.js'
+
+// The same links as token_url in src/cloudflare.zig and src/github.zig;
+// the dashboard keeps its own copy, so that it works with any server.
+export const cloudflareTokenUrl =
+  'https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=' +
+  '%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%2C' +
+  '%7B%22key%22%3A%22argotunnel%22%2C%22type%22%3A%22edit%22%7D%2C' +
+  '%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C' +
+  '%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C' +
+  '%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22edit%22%7D%5D' +
+  '&accountId=*&zoneId=all&name=PocketHarbor'
+
+export const githubTokenUrl =
+  'https://github.com/settings/personal-access-tokens/new?name=PocketHarbor' +
+  '&description=Builds+and+deploys+on+push+from+PocketHarbor&expires_in=none' +
+  '&contents=read&repository_hooks=write'
+
+export function CloudflareIcon({ size = 18 }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
+      <path d={siCloudflare.path} />
+    </svg>
+  )
+}
+
+const brand = {
+  cloudflare: { name: 'Cloudflare', Icon: CloudflareIcon, url: cloudflareTokenUrl },
+  github: { name: 'GitHub', Icon: GithubIcon, url: githubTokenUrl },
+}
+
+/** "Connect Cloudflare" or "Connect GitHub", as their own buttons look.
+ * With `href` it opens that page in a new tab; otherwise it calls `onClick`. */
+export function ConnectButton({ kind, href, onClick, small }) {
+  const { name, Icon } = brand[kind]
+  const cls = `brand-btn ${kind}${small ? ' sm' : ''}`
+  const inner = (
+    <>
+      <Icon size={small ? 14 : 18} />
+      Connect {name}
+    </>
+  )
+  return href ? (
+    <a class={cls} href={href} target="_blank" rel="noreferrer" onClick={onClick}>
+      {inner}
+    </a>
+  ) : (
+    <button type="button" class={cls} onClick={onClick}>
+      {inner}
+    </button>
+  )
+}
 
 /** The token, and the Account ID if any, out of whatever was pasted: the
  * token alone, or all that Cloudflare shows once it is made. */
@@ -24,6 +75,8 @@ export function readGithubPaste(text) {
 }
 
 const busy = signal('')
+/** Which token forms were opened: their paste field shows. */
+const opened = signal({})
 
 async function connect(e, kind, onDone) {
   e.preventDefault()
@@ -41,7 +94,8 @@ async function connect(e, kind, onDone) {
   try {
     await put(kind === 'cloudflare' ? '/cloudflare' : '/github', body)
     form.reset()
-    toast(kind === 'cloudflare' ? 'Cloudflare connected' : 'GitHub token saved', 'success')
+    opened.value = { ...opened.peek(), [kind]: false }
+    toast(`${brand[kind].name} connected`, 'success')
     if (onDone) await onDone()
   } catch (err) {
     toast(err.message, 'error')
@@ -50,38 +104,35 @@ async function connect(e, kind, onDone) {
   }
 }
 
-const steps = {
-  cloudflare: {
-    button: 'Create the token on Cloudflare',
-    placeholder: 'Paste the token here',
-    hint: 'The permissions are filled in: Continue to summary, Create Token, then paste it here.',
-    submit: 'Connect',
-  },
-  github: {
-    button: 'Create the token on GitHub',
-    placeholder: 'github_pat_...',
-    hint: 'The permissions are filled in: choose the repositories, Generate token, then paste it here.',
-    submit: 'Save',
-  },
-}
-
-/** The two steps, for `kind` 'cloudflare' or 'github'. */
-export function TokenSteps({ kind, url, onDone, secondary }) {
-  const t = steps[kind]
+/** The brand's Connect button; once it has opened their form, the field
+ * that takes the token back. */
+export function TokenSteps({ kind, onDone }) {
+  const { name, url } = brand[kind]
   const working = busy.value === kind
+  const open = opened.value[kind]
   return (
     <div class="token-steps">
-      <a class={`btn${secondary ? '' : ' primary'}`} href={url} target="_blank" rel="noreferrer">
-        {t.button} <ExternalLink />
-      </a>
-      <form class="cf-paste" onSubmit={(e) => connect(e, kind, onDone)}>
-        <input class="input mono" name="token" type="password" placeholder={t.placeholder} required autocomplete="off" aria-label={`${kind} token`} />
-        <button class="btn" disabled={working}>
-          {working && <Spinner />}
-          {t.submit}
+      <ConnectButton kind={kind} href={url} onClick={() => (opened.value = { ...opened.peek(), [kind]: true })} />
+      {open ? (
+        <>
+          <form class="cf-paste" onSubmit={(e) => connect(e, kind, onDone)}>
+            <input class="input mono" name="token" type="password" placeholder={`Paste the ${name} token`} required autofocus autocomplete="off" aria-label={`${name} token`} />
+            <button class="btn primary" disabled={working}>
+              {working && <Spinner />}
+              Connect
+            </button>
+          </form>
+          <p class="muted small token-hint">
+            {kind === 'cloudflare'
+              ? 'The permissions are already filled in: Continue to summary, Create Token, then paste it here.'
+              : 'The permissions are already filled in: choose the repositories, Generate token, then paste it here.'}
+          </p>
+        </>
+      ) : (
+        <button type="button" class="linkish small token-have" onClick={() => (opened.value = { ...opened.peek(), [kind]: true })}>
+          I already have a token
         </button>
-      </form>
-      <p class="muted small token-hint">{t.hint}</p>
+      )}
     </div>
   )
 }

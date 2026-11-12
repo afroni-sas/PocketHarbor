@@ -16,13 +16,13 @@ let element = null
 let wanted = null
 
 const theme = {
-  background: '#13111c',
-  foreground: '#e4e2ee',
-  cursor: '#b9a8ff',
-  cursorAccent: '#13111c',
-  selectionBackground: 'rgba(144, 133, 233, 0.35)',
-  black: '#1e1b2b',
-  brightBlack: '#5c5873',
+  background: '#191612',
+  foreground: '#ece6dd',
+  cursor: '#e0aa55',
+  cursorAccent: '#191612',
+  selectionBackground: 'rgba(196, 146, 60, 0.35)',
+  black: '#24201b',
+  brightBlack: '#6b6257',
 }
 
 function sendSize() {

@@ -7,7 +7,7 @@ import { del, get, patch, post, put } from '../api.js'
 import { me, toast } from '../state.js'
 import { navigate, route, withQuery } from '../router.js'
 import { attempt, confirm, copy, GithubIcon, openForm, Spinner, timeAgo } from '../ui.jsx'
-import { TokenSteps } from '../connect.jsx'
+import { CloudflareIcon, ConnectButton, TokenSteps } from '../connect.jsx'
 import { SettingsLayout } from './SettingsLayout.jsx'
 import { Alerts } from './Alerts.jsx'
 
@@ -236,9 +236,14 @@ function CloudflareCard() {
   if (!cf.connected) {
     return (
       <section class="card card-pad set-card">
-        <h3>Cloudflare</h3>
-        <p class="muted small" style="margin:-6px 0 14px">Your services on the internet, over HTTPS, with no port to open.</p>
-        <TokenSteps kind="cloudflare" url={cf.create_url} onDone={() => load('networking')} />
+        <h3 class="brand-title">
+          <span class="brand-mark cloudflare">
+            <CloudflareIcon size={16} />
+          </span>
+          Cloudflare
+        </h3>
+        <p class="muted small card-desc">Your services on the internet, over HTTPS, with no port to open.</p>
+        <TokenSteps kind="cloudflare" onDone={() => load('networking')} />
       </section>
     )
   }
@@ -247,7 +252,12 @@ function CloudflareCard() {
   return (
     <section class="card card-pad set-card">
       <div class="cf-head">
-        <h3>Cloudflare</h3>
+        <h3 class="brand-title">
+          <span class="brand-mark cloudflare">
+            <CloudflareIcon size={16} />
+          </span>
+          Cloudflare
+        </h3>
         <span class="spacer" />
         <button class="btn sm" onClick={syncCloudflare} disabled={busy} title={st.synced_at ? `Synced ${timeAgo(st.synced_at)}` : undefined}>
           {busy && <span class="spinner" style="width:12px;height:12px" />} Sync
@@ -411,7 +421,12 @@ function Github() {
     <>
       <section class="card card-pad set-card">
         <div class="cf-head">
-          <h3>GitHub</h3>
+          <h3 class="brand-title">
+            <span class="brand-mark github">
+              <GithubIcon size={15} />
+            </span>
+            GitHub
+          </h3>
           <span class="spacer" />
           {g.has_token && !replacing && (
             <>
@@ -432,10 +447,9 @@ function Github() {
           </div>
         ) : (
           <>
-            <p class="muted small" style="margin:-6px 0 14px">Private repositories, your repositories in the Add dialog, and deploy on push.</p>
+            <p class="muted small card-desc">Private repositories, your repositories in the Add dialog, and deploy on push.</p>
             <TokenSteps
               kind="github"
-              url={g.token_url}
               onDone={async () => {
                 replacingGithub.value = false
                 await load('github')
@@ -446,19 +460,17 @@ function Github() {
       </section>
       <section class="card card-pad set-card">
         <h3>Deploy on push</h3>
-        {g.cloudflare && g.has_token ? (
-          <p class="muted small" style="margin:-6px 0 12px">Automatic: each repository a service deploys from gets its webhook.</p>
-        ) : (
-          <p class="muted small" style="margin:-6px 0 12px">
-            Automatic once {!g.cloudflare ? 'Cloudflare is connected, so that GitHub reaches the phone' : ''}
-            {!g.cloudflare && !g.has_token ? ', and ' : ''}
-            {!g.has_token ? 'a GitHub token is saved' : ''}.{' '}
-            {!g.cloudflare && (
-              <button class="linkish" onClick={() => navigate('/settings?tab=networking')}>
-                Connect Cloudflare
-              </button>
-            )}
-          </p>
+        <p class="muted small card-desc">
+          {g.cloudflare && g.has_token
+            ? 'Automatic: each repository a service deploys from gets its webhook.'
+            : !g.cloudflare
+              ? 'Automatic once Cloudflare is connected: GitHub then reaches the phone.'
+              : 'Automatic once the GitHub token above is saved.'}
+        </p>
+        {!g.cloudflare && (
+          <div class="card-action">
+            <ConnectButton kind="cloudflare" small onClick={() => navigate('/settings?tab=networking')} />
+          </div>
         )}
         {g.hooks && g.hooks.length > 0 && (
           <div class="hook-list">

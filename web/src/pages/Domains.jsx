@@ -4,12 +4,13 @@
 // records itself; the state always comes from a real request through the name.
 
 import { signal } from '@preact/signals'
-import { ArrowRight, Check, CircleCheck, Cloud, Copy, Globe, Info, Pencil, Plus, Trash, TriangleAlert, Zap } from 'lucide-preact'
+import { ArrowRight, Check, CircleCheck, Copy, Globe, Info, Pencil, Plus, Trash, TriangleAlert, Zap } from 'lucide-preact'
 import { enc, get, post, put } from '../api.js'
 import { closeOverlay, overlay, toast } from '../state.js'
 import { navigate } from '../router.js'
 import { copy, Spinner } from '../ui.jsx'
 import { privateName, refresh } from '../project.js'
+import { ConnectButton } from '../connect.jsx'
 
 /** The domains of the service on screen, with their records and states. */
 export const domainInfo = signal({ id: '', data: null, checking: false, at: 0 })
@@ -707,9 +708,8 @@ async function generateRelayDomain(svc, update, port, info) {
 }
 
 /** Railway's Generate Service Domain: an address on workers.dev through the
- * relay; without it, a name in one of the Cloudflare zones, or a temporary
- * address. */
-function GenerateForm({ svc, update, info, quickTunnel }) {
+ * relay, or a name in the zone chosen for generated names. */
+function GenerateForm({ svc, update, info }) {
   const v = draft.value
   const zones = info.zones || []
   if (info.relay_ready || info.generates_in) {
@@ -748,36 +748,6 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
       </div>
     )
   }
-  if (!info.managed) {
-    return (
-      <form
-        class="net-form"
-        onSubmit={async (e) => {
-          e.preventDefault()
-          draft.value = { ...draft.peek(), busy: true }
-          try {
-            await savePort(svc, update, portOf(v.port))
-            await quickTunnel(svc)
-            form.value = ''
-          } finally {
-            draft.value = { ...draft.peek(), busy: false }
-          }
-        }}
-      >
-        <b>Generate Service Domain</b>
-        <label for="gen-port">Enter the port your app is listening on</label>
-        <input class="input" id="gen-port" type="number" min="1" max="65535" placeholder={String(svc.port || 8080)} value={v.port} autofocus onInput={(e) => (draft.value = { ...draft.peek(), port: e.currentTarget.value })} />
-        <Foot hint="A preview address, until the phone restarts">
-          <button type="button" class="btn sm" onClick={() => (form.value = '')}>
-            Cancel
-          </button>
-          <button class="btn primary sm" disabled={v.busy}>
-            {v.busy && <Spinner />} Preview URL
-          </button>
-        </Foot>
-      </form>
-    )
-  }
   // Cloudflare is connected, but neither the relay nor a zone for generated
   // names is ready: say what is missing.
   return (
@@ -800,7 +770,7 @@ function GenerateForm({ svc, update, info, quickTunnel }) {
 }
 
 /** Railway's Public Networking: the list, the forms and the two buttons. */
-export function PublicNetworking({ svc, update, quickTunnel, quick }) {
+export function PublicNetworking({ svc, update, quick }) {
   const state = domainInfo.value
   const info = state.id === svc.id ? state.data : null
   // The generated name first, as on Railway.
@@ -816,7 +786,13 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
   const any = (list && list.length > 0) || quick || svc.hostnames.includes('*') || incoming.length > 0
   return (
     <>
-      <p class="net-hint">{any ? 'Access your application over HTTP with the following domains' : 'Access to this service publicly through HTTP'}</p>
+      <p class="net-hint">
+        {any
+          ? 'Access your application over HTTP with the following domains'
+          : info && !info.managed
+            ? 'Connect Cloudflare to reach this service from the internet, over HTTPS'
+            : 'Access to this service publicly through HTTP'}
+      </p>
       {list === null && svc.hostnames.some((h) => h !== '*') && (
         <div class="empty">
           <Spinner />
@@ -859,8 +835,14 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
           )}
         </div>
       )}
-      {open === 'custom' && <CustomForm svc={svc} update={update} info={info} />}
-      {open === 'generate' && info && <GenerateForm svc={svc} update={update} info={info} quickTunnel={quickTunnel} />}
+      {open === 'custom' && info && info.managed && <CustomForm svc={svc} update={update} info={info} />}
+      {open === 'generate' && info && info.managed && <GenerateForm svc={svc} update={update} info={info} />}
+      {info && !info.managed && (
+        <div class="net-buttons">
+          <ConnectButton kind="cloudflare" small onClick={connectCloudflare} />
+        </div>
+      )}
+      {info && info.managed && (
       <div class="net-buttons">
         <button
           class="btn sm"
@@ -884,12 +866,8 @@ export function PublicNetworking({ svc, update, quickTunnel, quick }) {
         >
           <Plus class="accent" /> Custom Domain
         </button>
-        {info && !info.managed && (
-          <button class="btn sm" onClick={connectCloudflare}>
-            <Cloud class="accent" /> Connect Cloudflare
-          </button>
-        )}
       </div>
+      )}
     </>
   )
 }

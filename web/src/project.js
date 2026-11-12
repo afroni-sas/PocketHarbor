@@ -9,6 +9,29 @@ import { match, navigate, route, withQuery } from './router.js'
 /** The pages of a project besides its canvas. */
 const views = ['settings', 'observability', 'logs']
 
+/** The width the service panel was dragged to, in pixels; 0 is the default.
+ * Kept in this browser only. */
+export const panelWidth = signal(readWidth())
+
+function readWidth() {
+  try {
+    const n = Number(localStorage.getItem('pharbor.panelWidth'))
+    return Number.isFinite(n) && n >= 480 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+export function savePanelWidth(n) {
+  panelWidth.value = n
+  try {
+    if (n) localStorage.setItem('pharbor.panelWidth', String(Math.round(n)))
+    else localStorage.removeItem('pharbor.panelWidth')
+  } catch {
+    // Private windows: the width lasts until the page closes.
+  }
+}
+
 export const page = computed(() => {
   const r = route.value
   const m = match('/project/:project', r.path) || match('/project/:project/service/:service', r.path) || match('/project/:project/:view', r.path)

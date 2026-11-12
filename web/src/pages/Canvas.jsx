@@ -2,10 +2,10 @@
 // lets cards be dragged, with dashed arrows for variable references.
 
 import { effect, signal } from '@preact/signals'
-import { Braces, ChartLine, Copy, Grid3x3, HardDrive, Link, Maximize, Plus, Redo2, Rocket, Settings, SquareTerminal, Trash, Undo2, ZoomIn, ZoomOut } from 'lucide-preact'
+import { Braces, ChartLine, Copy, Grid3x3, HardDrive, Link, Maximize, Plus, Redo2, Rocket, Settings, SquareTerminal, Trash, Undo2, Workflow, ZoomIn, ZoomOut } from 'lucide-preact'
 import { enc, get, patch, post } from '../api.js'
 import { edges, services, toast } from '../state.js'
-import { closeService, openService, page, privateName, refresh } from '../project.js'
+import { closeService, openService, page, panelWidth, privateName, refresh } from '../project.js'
 import { attempt, copy, openMenuAt, ServiceIcon, Spinner, Status } from '../ui.jsx'
 import { openAdd } from './AddDialog.jsx'
 import { removeService } from './ServicePanel.jsx'
@@ -20,6 +20,8 @@ const GAP_Y = 240
 const view = signal({ x: 0, y: 0, k: 1 })
 const grid = signal(true)
 const drag = signal(null)
+/** True while the cards glide to the places Auto Layout gave them. */
+const arranging = signal(false)
 
 /** Where cards were dropped, until the server's copy catches up. */
 const moved = {}
@@ -243,7 +245,9 @@ function undo() {
   const last = h.done[h.done.length - 1]
   if (!last) return
   history.value = { done: h.done.slice(0, -1), undone: [...h.undone, last] }
-  moveTo(last.id, last.from.x, last.from.y)
+  glide(last.batch, () => {
+    for (const m of last.batch || [last]) moveTo(m.id, m.from.x, m.from.y)
+  })
 }
 
 function redo() {
@@ -251,7 +255,127 @@ function redo() {
   const next = h.undone[h.undone.length - 1]
   if (!next) return
   history.value = { done: [...h.done, next], undone: h.undone.slice(0, -1) }
-  moveTo(next.id, next.to.x, next.to.y)
+  glide(next.batch, () => {
+    for (const m of next.batch || [next]) moveTo(m.id, m.to.x, m.to.y)
+  })
+}
+
+/** Runs `move`, letting the cards glide when several of them go at once. */
+let glideTimer = 0
+function glide(several, move) {
+  if (!several) return move()
+  clearTimeout(glideTimer)
+  arranging.value = true
+  move()
+  glideTimer = setTimeout(() => (arranging.value = false), 420)
+}
+
+const ROW_GAP = 64
+
+/**
+ * Arranges the cards by their references, in columns from left to right:
+ * the services nobody refers to first, then what they use, so that every
+ * arrow points right. Each column is ordered to keep arrows from crossing,
+ * and services without any reference go in rows below.
+ */
+export function layout(list, refs) {
+  const names = list.map((s) => s.name)
+  const byName = Object.fromEntries(list.map((s) => [s.name, s]))
+  const out = {}
+  const parents = {}
+  for (const n of names) {
+    out[n] = []
+    parents[n] = []
+  }
+  for (const { from, to } of refs) {
+    if (!(from in out) || !(to in out) || from === to || out[from].includes(to)) continue
+    out[from].push(to)
+    parents[to].push(from)
+  }
+  const linked = names.filter((n) => out[n].length || parents[n].length)
+  const alone = names.filter((n) => !out[n].length && !parents[n].length)
+  // The column: the longest chain of references that leads to the service.
+  // A cycle is cut where the walk meets it again.
+  const col = {}
+  const walking = new Set()
+  const depth = (n) => {
+    if (n in col) return col[n]
+    if (walking.has(n)) return 0
+    walking.add(n)
+    let d = 0
+    for (const p of parents[n]) d = Math.max(d, depth(p) + 1)
+    walking.delete(n)
+    return (col[n] = d)
+  }
+  for (const n of linked) depth(n)
+  // A service nobody refers to sits just before what it uses: arrows then
+  // skip as few columns as possible.
+  for (const n of linked) {
+    if (parents[n].length === 0 && out[n].length > 0) col[n] = Math.max(0, Math.min(...out[n].map((m) => col[m])) - 1)
+  }
+  // No empty column left between the others.
+  const used = [...new Set(linked.map((n) => col[n]))].sort((a, b) => a - b)
+  for (const n of linked) col[n] = used.indexOf(col[n])
+  const cols = []
+  // Start from where the cards are, so that the order the user chose holds.
+  const start = place(list)
+  const yOf = Object.fromEntries(start.map((nd) => [nd.svc.name, nd.y]))
+  for (const n of [...linked].sort((a, b) => yOf[a] - yOf[b])) (cols[col[n]] = cols[col[n]] || []).push(n)
+  for (let i = 0; i < cols.length; i++) cols[i] = cols[i] || []
+  // A few sweeps of the barycentre heuristic: each service near the middle
+  // of the ones it is linked to in the column beside it.
+  const rank = {}
+  const index = () => cols.forEach((c) => c.forEach((n, i) => (rank[n] = i)))
+  const centre = (n, links) => (links.length ? links.reduce((t, m) => t + rank[m], 0) / links.length : rank[n])
+  index()
+  for (let pass = 0; pass < 4; pass++) {
+    const forward = pass % 2 === 0
+    for (let i = forward ? 1 : cols.length - 2; forward ? i < cols.length : i >= 0; i += forward ? 1 : -1) {
+      const near = (n) => (forward ? parents[n] : out[n]).filter((m) => col[m] === i + (forward ? -1 : 1))
+      const key = Object.fromEntries(cols[i].map((n) => [n, centre(n, near(n))]))
+      cols[i].sort((a, b) => key[a] - key[b] || rank[a] - rank[b])
+      index()
+    }
+  }
+  const snap = (v) => Math.round(v / 20) * 20
+  const heights = cols.map((c) => c.reduce((t, n) => t + heightOf(byName[n]), 0) + Math.max(0, c.length - 1) * ROW_GAP)
+  const tallest = Math.max(0, ...heights)
+  const at = {}
+  cols.forEach((c, i) => {
+    let y = 80 + (tallest - heights[i]) / 2
+    for (const n of c) {
+      at[n] = { x: 80 + i * GAP_X, y: snap(y) }
+      y += heightOf(byName[n]) + ROW_GAP
+    }
+  })
+  // The others, in rows of as many cards as the columns above are wide.
+  const across = Math.max(3, cols.length)
+  let y = linked.length ? 80 + tallest + 120 : 80
+  for (let i = 0; i < alone.length; i += across) {
+    const row = alone.slice(i, i + across)
+    row.forEach((n, j) => (at[n] = { x: 80 + j * GAP_X, y: snap(y) }))
+    y += Math.max(...row.map((n) => heightOf(byName[n]))) + ROW_GAP
+  }
+  return at
+}
+
+function autoLayout() {
+  const list = services.peek() || []
+  if (list.length === 0) return
+  const at = layout(list, edges.peek() || [])
+  const now = Object.fromEntries(place(list).map((n) => [n.svc.id, { x: n.x, y: n.y }]))
+  const batch = []
+  for (const svc of list) {
+    const to = at[svc.name]
+    const from = now[svc.id]
+    if (to && (to.x !== from.x || to.y !== from.y)) batch.push({ id: svc.id, from, to })
+  }
+  if (batch.length === 0) return fit()
+  history.value = { done: [...history.peek().done, { batch }].slice(-50), undone: [] }
+  glide(batch, () => {
+    for (const m of batch) moveTo(m.id, m.to.x, m.to.y)
+  })
+  setTimeout(fit, 440)
 }
 
 addEventListener('keydown', (e) => {
@@ -314,15 +438,40 @@ function stepPath(points, r = 5) {
   return `${d} L${end.x},${end.y}`
 }
 
-/** From the side of `a` that faces `b` to the side of `b` that faces `a`. */
-export function route(a, ha, b, hb, offset = 0) {
+/** Whether the segment from `p` to `q` (level or upright) runs through card `r`. */
+function hits(p, q, r) {
+  const m = 10
+  return Math.min(p.x, q.x) < r.x + r.w + m && Math.max(p.x, q.x) > r.x - m && Math.min(p.y, q.y) < r.y + r.h + m && Math.max(p.y, q.y) > r.y - m
+}
+
+const clear = (points, cards) => points.every((p, i) => i === 0 || !cards.some((r) => hits(points[i - 1], p, r)))
+
+/**
+ * From the side of `a` that faces `b` to the side of `b` that faces `a`, around
+ * the other `cards` ({x, y, w, h}): through the middle, else through the gap
+ * beside either end, else above or below what stands between them.
+ */
+export function route(a, ha, b, hb, offset = 0, cards = []) {
   if (b.x >= a.x + W + 24 || b.x + W + 24 <= a.x) {
     const right = b.x > a.x
     const s = { x: right ? a.x + W : a.x, y: a.y + ha / 2 + offset }
     const t = { x: right ? b.x : b.x + W, y: b.y + hb / 2 + offset }
-    if (Math.abs(s.y - t.y) < 1) return stepPath([s, { x: t.x, y: s.y }])
-    const mid = Math.round((s.x + t.x) / 2)
-    return stepPath([s, { x: mid, y: s.y }, { x: mid, y: t.y }, t])
+    const dir = right ? 1 : -1
+    const gap = (GAP_X - W) / 2
+    const via = (x) => (Math.abs(s.y - t.y) < 1 ? [s, t] : [s, { x, y: s.y }, { x, y: t.y }, t])
+    const near = s.x + dir * gap
+    const far = t.x - dir * gap
+    const tries = [via(Math.round((s.x + t.x) / 2)), via(near), via(far)]
+    // Above or below the cards in between, nearest first.
+    const between = cards.filter((r) => r.x + r.w > Math.min(near, far) && r.x < Math.max(near, far))
+    if (between.length) {
+      const top = Math.min(...between.map((r) => r.y)) - 28
+      const bottom = Math.max(...between.map((r) => r.y + r.h)) + 28
+      const around = (y) => [s, { x: near, y: s.y }, { x: near, y }, { x: far, y }, { x: far, y: t.y }, t]
+      const cost = (y) => Math.abs(s.y - y) + Math.abs(t.y - y)
+      tries.push(...(cost(top) <= cost(bottom) ? [around(top), around(bottom)] : [around(bottom), around(top)]))
+    }
+    return stepPath(tries.find((p) => clear(p, cards)) || tries[0])
   }
   const down = b.y > a.y
   const s = { x: a.x + W / 2 + offset, y: down ? a.y + ha : a.y }
@@ -344,7 +493,8 @@ function Edges({ nodes }) {
     if (!a || !b) continue
     // Two services that refer to each other get two arrows side by side.
     const offset = both.has(`${to}>${from}`) ? (from < to ? -20 : 20) : 0
-    paths.push(<path key={`${from}>${to}`} d={route(a, heightOf(a.svc), b, heightOf(b.svc), offset)} />)
+    const cards = nodes.filter((n) => n !== a && n !== b).map((n) => ({ x: n.x, y: n.y, w: W, h: heightOf(n.svc) }))
+    paths.push(<path key={`${from}>${to}`} d={route(a, heightOf(a.svc), b, heightOf(b.svc), offset, cards)} />)
   }
   return (
     <svg class="edges" width="1" height="1" aria-hidden="true">
@@ -363,7 +513,8 @@ function Edges({ nodes }) {
 /** The width the service panel leaves of the canvas. */
 function openWidth(rect) {
   if (rect.width < 760) return rect.width
-  return rect.width - Math.min(904, rect.width * 0.67)
+  const chosen = panelWidth.peek()
+  return rect.width - (chosen ? Math.min(chosen, rect.width - 160) : Math.min(904, rect.width * 0.67))
 }
 
 // Opening a service moves the canvas so that its card stays in sight beside
@@ -422,7 +573,7 @@ export function Canvas() {
       onPointerCancel={onPointerUp}
       onWheel={onWheel}
     >
-      <div class="world" style={`transform:translate(${v.x}px,${v.y}px) scale(${v.k})`}>
+      <div class={`world${arranging.value ? ' arranging' : ''}`} style={`transform:translate(${v.x}px,${v.y}px) scale(${v.k})`}>
         <Edges nodes={nodes} />
         {nodes.map((n) => (
           <Card key={n.svc.id} node={n} selected={p.service === n.svc.name} dragging={d && d.id === n.svc.id} />
@@ -467,6 +618,11 @@ export function CanvasOverlay() {
           </button>
           <button title="Fit to screen" aria-label="Fit to screen" onClick={fit}>
             <Maximize />
+          </button>
+        </div>
+        <div class="group">
+          <button title="Auto layout" aria-label="Auto layout" onClick={autoLayout} disabled={!list || list.length < 2}>
+            <Workflow />
           </button>
         </div>
         <div class="group">

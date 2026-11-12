@@ -137,8 +137,8 @@ A service built from GitHub deploys on every push to its branch (Settings › So
 
 The dashboard looks like Railway's:
 
-- a canvas of the project's services, with their connections;
-- per service: deployments and their logs, variables, metrics, a console, volumes and backups, cron runs, settings;
+- a canvas of the project's services, with their connections; **Auto Layout** arranges it by references (what uses what reads left to right, arrows go around the cards), and every move can be undone;
+- per service: deployments and their logs, variables, metrics, a console, volumes and backups, cron runs, settings, in a panel whose edge drags to resize it (a double click puts it back);
 - per project: observability, logs and settings.
 
 It installs as an app (Add to Home screen) when opened over HTTPS, through a domain. Browsers only allow that on secure origins.

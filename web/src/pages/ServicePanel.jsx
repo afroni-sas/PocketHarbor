@@ -37,7 +37,7 @@ import {
 import { del, enc, get, patch, post } from '../api.js'
 import { me, services, toast } from '../state.js'
 import { navigate } from '../router.js'
-import { closeService, markDirty, page, privateName, refresh, serviceId, setQuery } from '../project.js'
+import { closeService, markDirty, page, panelWidth, privateName, refresh, savePanelWidth, serviceId, setQuery } from '../project.js'
 import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, size, Spinner, StatusMark, statusOf, timeAgo } from '../ui.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
 import { LogsView } from './Logs.jsx'
@@ -716,14 +716,6 @@ function PushState({ svc }) {
   )
 }
 
-async function generateDomain(svc) {
-  await attempt(async () => {
-    const res = await post('/tunnel/quick', { service: svc.id })
-    tunnel.value = await get('/tunnel').catch(() => ({ url: res.url, default_service: svc.id, running: true }))
-    toast(`Public at ${res.url}`, 'success')
-  })
-}
-
 function addVolume(svc) {
   openForm({
     title: 'Add a volume',
@@ -886,7 +878,7 @@ function Settings({ svc }) {
 
         <Section id="networking" icon={Network} title="Networking" keys="domain public private port tunnel">
           <Group label="Public Networking" keys="domain custom public tunnel dns generate">
-            <PublicNetworking svc={svc} update={update} quickTunnel={generateDomain} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
+            <PublicNetworking svc={svc} update={update} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
           </Group>
           <Group label="Private Networking" hint="Communicate with this service from within the phone's private network." keys="private internal dns port">
             <PrivateNetworking svc={svc} update={update} />
@@ -1033,6 +1025,66 @@ function Settings({ svc }) {
   )
 }
 
+const MIN_PANEL = 480
+
+/** The widest the panel may be: the canvas keeps a strip to click on. */
+function maxPanel(aside) {
+  const stage = aside.parentElement.getBoundingClientRect()
+  return Math.max(MIN_PANEL, stage.width - 160)
+}
+
+/** The left edge of the panel: dragged, it sets the panel's width, which
+ * this browser keeps; a double click puts the default back. */
+function Resizer() {
+  const down = (e) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const handle = e.currentTarget
+    const aside = handle.parentElement
+    const right = aside.getBoundingClientRect().right
+    handle.setPointerCapture(e.pointerId)
+    document.body.classList.add('resizing')
+    let moved = false
+    const move = (ev) => {
+      moved = true
+      const width = Math.min(maxPanel(aside), Math.max(MIN_PANEL, right - ev.clientX))
+      panelWidth.value = Math.round(width)
+    }
+    const up = () => {
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', up)
+      handle.removeEventListener('pointercancel', up)
+      document.body.classList.remove('resizing')
+      // A click alone, or the double click that resets, changes nothing.
+      if (moved) savePanelWidth(panelWidth.peek())
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', up)
+    handle.addEventListener('pointercancel', up)
+  }
+  const key = (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    const aside = e.currentTarget.parentElement
+    const now = aside.getBoundingClientRect().width
+    const step = e.shiftKey ? 96 : 24
+    savePanelWidth(Math.min(maxPanel(aside), Math.max(MIN_PANEL, now + (e.key === 'ArrowLeft' ? step : -step))))
+  }
+  return (
+    <div
+      class="panel-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the panel"
+      title="Drag to resize · double-click to reset"
+      tabIndex={0}
+      onPointerDown={down}
+      onKeyDown={key}
+      onDblClick={() => savePanelWidth(0)}
+    />
+  )
+}
+
 export function ServicePanel() {
   const p = page.value
   const list = services.value
@@ -1064,7 +1116,8 @@ export function ServicePanel() {
   const tab = tabs.some(([id]) => id === p.tab) ? p.tab : tabs[0][0]
   return (
     <>
-      <aside class="panel" aria-label={svc.name}>
+      <aside class="panel" aria-label={svc.name} style={panelWidth.value ? `--panel-w:${panelWidth.value}px` : undefined}>
+        <Resizer />
         <div class="panel-head">
           <div class="panel-title">
             <ServiceIcon svc={svc} size={26} />
