@@ -21,8 +21,7 @@ installer installs with it.
 | **Termux:Boot** | PocketHarbor and its services start again when the phone restarts. | Install [Termux:Boot](https://f-droid.org/packages/com.termux.boot/) from the same place as Termux, and open it once. The installer then sets it up. |
 | **A Cloudflare account** | Your services on the internet, over HTTPS, with no port to open, even behind a carrier's network. Without a domain, they get `workers.dev` addresses. | A free account at [cloudflare.com](https://dash.cloudflare.com/sign-up), then one click in Settings › Public access: see [Public access](#public-access). |
 | **A domain name** | Addresses like `app.example.com`, with no request limit. | Any registrar; [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) sells them at cost. Add the domain to your Cloudflare account, and PocketHarbor writes its records. A domain kept elsewhere works too, with two records: see [Custom domains](#custom-domains). |
-| **A GitHub token** | Builds of private repositories, and your repositories listed in the Add dialog. | [github.com › Settings › Developer settings › Fine-grained tokens](https://github.com/settings/personal-access-tokens/new): access to the repositories, with *Contents: Read-only*. Paste it in Settings › GitHub. |
-| **A GitHub webhook** | A deployment on every push. | Needs public access. Settings › GitHub shows the address and the secret to give the repository's Settings › Webhooks. |
+| **A GitHub token** | Builds of private repositories, your repositories in the Add dialog, and a deployment on every push. | In Settings › GitHub, **Create the token on GitHub** opens GitHub's form with its permissions filled in (*Contents: Read*, *Webhooks: Read and write*): choose the repositories, generate it and paste it back. With Cloudflare connected, PocketHarbor then adds each repository's push webhook itself. |
 | **Alerts** | Messages when a deployment fails, a service crashes or a cron run fails. | A [Discord](https://support.discord.com/hc/en-us/articles/228383668) or [Slack](https://api.slack.com/messaging/webhooks) webhook address, or a [Resend](https://resend.com) API key for email. Settings › Alerts. |
 | **Registry credentials** | Images from private registries (GHCR, Docker Hub, others). | A token of the registry; Settings › Registries, or `pharbor registry login HOST -u USER`. |
 
@@ -115,8 +114,10 @@ Without a Cloudflare account, **Without a Cloudflare account** offers a temporar
 
 In a service's **Settings › Networking**, as on Railway:
 
-- **Generate Domain**: one address per service, named after the service's id, on `workers.dev` or in your zone.
-- **Custom Domain**: a name of yours and the port your app listens on.
+- **Generate Domain**: one address per service, named after the service's id, on `workers.dev` or in your zone. Its pencil changes the name and where it lives. Without Cloudflare, it gives a preview address on `trycloudflare.com`, and **Connect Cloudflare** leads to Settings › Public access.
+- **Custom Domain**: a name in one of your zones (a subdomain and the zone to pick), or any other name, and the port your app listens on.
+
+While a name is added, renamed or removed, its row says what PocketHarbor is doing (writing the DNS record, deploying or removing the Worker) until it is done.
 
 Until a name works, its row says *Waiting for DNS update*, and **Show DNS records** shows the records it needs. With Cloudflare connected, a name in one of your zones needs nothing: PocketHarbor writes its record. A name kept elsewhere needs the two records shown, added where its DNS is.
 
@@ -127,6 +128,10 @@ Cloudflare's free certificate covers a zone and one level below it: `app.example
 Without Cloudflare, a name works on your network only: point an `A` record at the phone's address, and open `http://NAME:8080`.
 
 **A base domain** (Settings › General, or `pharbor domain base example.com`) gives every service `NAME.example.com` at once, through one wildcard record.
+
+## Deploy on push
+
+A service built from GitHub deploys on every push to its branch (Settings › Source › Auto Deploy). Once Cloudflare is connected and a GitHub token is saved, PocketHarbor adds a webhook to each repository a service deploys from, pointed at the dashboard's public name and signed with its secret, and removes it when no service uses the repository any more. Auto Deploy shows whether pushes reach the phone, and what is missing when they do not. Settings › GitHub lists the repositories and their state, and still shows the address and secret to set the webhook up by hand.
 
 ## Dashboard
 

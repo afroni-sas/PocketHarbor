@@ -17,6 +17,21 @@ pub const Repo = struct {
     pushed_at: ?[]const u8 = null,
 };
 
+pub const Hook = struct {
+    id: u64,
+    active: bool = true,
+    config: struct { url: []const u8 = "" } = .{},
+};
+
+/// Where GitHub sends pushes: any public name of the phone reaches it.
+pub const webhook_path = "/__pharbor/webhooks/github";
+
+/// GitHub's form for a fine-grained token, filled in: read the code, and
+/// manage the webhooks that deploy on push. The repositories are chosen there.
+pub const token_url = "https://github.com/settings/personal-access-tokens/new?name=PocketHarbor" ++
+    "&description=Builds+and+deploys+on+push+from+PocketHarbor&expires_in=none" ++
+    "&contents=read&repository_hooks=write";
+
 /// "owner/name", from that or from a github.com URL.
 pub fn normalizeRepo(input: []const u8) ?[]const u8 {
     var s = std.mem.trim(u8, input, " /");
@@ -93,6 +108,82 @@ pub const Client = struct {
         const doc = try std.json.parseFromSliceLeaky(Doc, a, body, .{ .ignore_unknown_fields = true });
         const first_line = std.mem.indexOfScalar(u8, doc.commit.message, '\n') orelse doc.commit.message.len;
         return .{ .sha = doc.sha, .message = doc.commit.message[0..first_line] };
+    }
+
+    /// A JSON request with a body, for the webhook calls. GitHub's message
+    /// goes to `message` when it refuses.
+    fn send(self: Client, a: Allocator, method: std.http.Method, url: []const u8, body: ?[]const u8, message: *[]const u8) ![]u8 {
+        var http: std.http.Client = .{ .allocator = self.gpa, .io = self.io };
+        defer http.deinit();
+        const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{self.token});
+        var req = http.request(method, try std.Uri.parse(url), .{
+            .keep_alive = false,
+            .redirect_behavior = .not_allowed,
+            .headers = .{
+                .accept_encoding = .omit,
+                .user_agent = .{ .override = "pocketharbor" },
+                .authorization = .{ .override = auth },
+                .content_type = if (body != null) .{ .override = "application/json" } else .default,
+            },
+            .extra_headers = &.{
+                .{ .name = "Accept", .value = "application/vnd.github+json" },
+                .{ .name = "X-GitHub-Api-Version", .value = "2022-11-28" },
+            },
+        }) catch {
+            message.* = "GitHub could not be reached";
+            return error.GitHubError;
+        };
+        defer req.deinit();
+        if (body) |b| try req.sendBodyComplete(@constCast(b)) else try req.sendBodiless();
+        var head_buf: [16384]u8 = undefined;
+        var resp = try req.receiveHead(&head_buf);
+        const status = resp.head.status;
+        var transfer: [16384]u8 = undefined;
+        const rd = resp.reader(&transfer);
+        var text: std.ArrayList(u8) = .empty;
+        var buf: [16384]u8 = undefined;
+        while (text.items.len < 4 << 20) {
+            const n = try rd.readSliceShort(&buf);
+            if (n == 0) break;
+            try text.appendSlice(a, buf[0..n]);
+        }
+        const code = @intFromEnum(status);
+        if (code >= 200 and code < 300) return text.items;
+        const Doc = struct { message: []const u8 = "" };
+        const doc = std.json.parseFromSliceLeaky(Doc, a, text.items, .{ .ignore_unknown_fields = true }) catch Doc{};
+        message.* = if (doc.message.len > 0) doc.message else try std.fmt.allocPrint(a, "GitHub answered {d}", .{code});
+        // Without the Webhooks permission GitHub answers 403, or 404 for a
+        // repository the token does not cover.
+        return if (code == 401 or code == 403 or code == 404) error.GitHubDenied else error.GitHubError;
+    }
+
+    /// The repository's webhooks.
+    pub fn hooks(self: Client, a: Allocator, repo: []const u8, message: *[]const u8) ![]Hook {
+        const url = try std.fmt.allocPrint(a, "{s}/repos/{s}/hooks?per_page=100", .{ self.api, repo });
+        const body = try self.send(a, .GET, url, null, message);
+        return std.json.parseFromSliceLeaky([]Hook, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    }
+
+    /// Adds PocketHarbor's push webhook, or updates it when `id` is one.
+    pub fn putHook(self: Client, a: Allocator, repo: []const u8, id: ?u64, target: []const u8, secret: []const u8, message: *[]const u8) !u64 {
+        const payload = try std.json.Stringify.valueAlloc(a, .{
+            .name = "web",
+            .active = true,
+            .events = &[_][]const u8{"push"},
+            .config = .{ .url = target, .content_type = "json", .secret = secret, .insecure_ssl = "0" },
+        }, .{});
+        const url = if (id) |n|
+            try std.fmt.allocPrint(a, "{s}/repos/{s}/hooks/{d}", .{ self.api, repo, n })
+        else
+            try std.fmt.allocPrint(a, "{s}/repos/{s}/hooks", .{ self.api, repo });
+        const body = try self.send(a, if (id == null) .POST else .PATCH, url, payload, message);
+        const made = std.json.parseFromSliceLeaky(Hook, a, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return id orelse error.GitHubError;
+        return made.id;
+    }
+
+    pub fn deleteHook(self: Client, a: Allocator, repo: []const u8, id: u64, message: *[]const u8) !void {
+        const url = try std.fmt.allocPrint(a, "{s}/repos/{s}/hooks/{d}", .{ self.api, repo, id });
+        _ = try self.send(a, .DELETE, url, null, message);
     }
 
     /// Downloads the repository at `sha` as a .tar.gz file.

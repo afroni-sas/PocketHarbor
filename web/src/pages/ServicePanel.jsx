@@ -36,6 +36,7 @@ import {
 } from 'lucide-preact'
 import { del, enc, get, patch, post } from '../api.js'
 import { me, services, toast } from '../state.js'
+import { navigate } from '../router.js'
 import { closeService, markDirty, page, privateName, refresh, serviceId, setQuery } from '../project.js'
 import { attempt, confirm, copy, GithubIcon, openForm, openMenu, ServiceIcon, size, Spinner, StatusMark, statusOf, timeAgo } from '../ui.jsx'
 import { loadVars, VariablesEditor } from './Variables.jsx'
@@ -683,6 +684,38 @@ function connect(svc, kind) {
   })
 }
 
+const pushText = {
+  ready: 'GitHub calls the phone on each push',
+  needs_cloudflare: 'GitHub cannot reach the phone yet: connect Cloudflare',
+  needs_token: 'Add a GitHub token, so that PocketHarbor adds the webhook',
+  denied: 'The GitHub token may not add the webhook: give it Webhooks: Read and write',
+  failed: 'The webhook is not set up',
+}
+
+/** Whether pushes reach the phone, and the one thing to do when not. */
+function PushState({ svc }) {
+  const p = svc.deploy_on_push
+  if (!p) return null
+  const ok = p.status === 'ready'
+  const fix = p.status === 'needs_cloudflare' ? ['Connect Cloudflare', '/settings?tab=networking'] : p.status === 'ready' ? null : ['Settings › GitHub', '/settings?tab=github']
+  return (
+    <div class="push-state">
+      <span class={`dot ${ok ? 'green' : 'yellow'}`} />
+      <span class="small">
+        {p.status === 'failed' && p.detail ? `The webhook is not set up: ${p.detail}` : pushText[p.status]}
+        {fix && (
+          <>
+            {' · '}
+            <button class="linkish" onClick={() => navigate(fix[1])}>
+              {fix[0]}
+            </button>
+          </>
+        )}
+      </span>
+    </div>
+  )
+}
+
 async function generateDomain(svc) {
   await attempt(async () => {
     const res = await post('/tunnel/quick', { service: svc.id })
@@ -802,8 +835,9 @@ function Settings({ svc }) {
               <Group label="Auto Deploy" keys="auto deploy push webhook">
                 <label class="check">
                   <input type="checkbox" checked={svc.auto_deploy} onChange={(e) => attempt(() => update(svc, { auto_deploy: e.currentTarget.checked }, true), 'Saved')} />
-                  Deploy on every push (needs the GitHub webhook of Settings)
+                  Deploy on every push to {svc.branch || 'main'}
                 </label>
+                {svc.auto_deploy && <PushState svc={svc} />}
               </Group>
             </>
           ) : svc.image ? (

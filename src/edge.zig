@@ -231,6 +231,15 @@ fn serviceUid(a: Allocator, store: Store, id: []const u8) ![]const u8 {
     return svc.uid;
 }
 
+/// A label of a generated name, which DNS and Workers both accept: a-z,
+/// 0-9 and dashes inside, 63 characters at most.
+pub fn validLabel(label: []const u8) bool {
+    if (label.len == 0 or label.len > 63) return false;
+    if (label[0] == '-' or label[label.len - 1] == '-') return false;
+    for (label) |ch| if (!(std.ascii.isLower(ch) or std.ascii.isDigit(ch) or ch == '-')) return false;
+    return true;
+}
+
 /// Gives a service its one generated name: in the zone chosen for them,
 /// through the tunnel and with no request limit; otherwise on workers.dev,
 /// through the relay. Both are named after the service's uid.
@@ -243,31 +252,67 @@ pub fn generateDomain(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key,
         for (svc.domains) |d| if (isRelayHost(settings, d)) return error.AlreadyGenerated;
     }
     const uid = try serviceUid(a, store, id);
+    return placeGenerated(a, gpa, io, key, store, id, uid, settings.generated_zone, failure);
+}
+
+/// Changes the service's generated name: its label, and where it is (a zone
+/// of the account, or workers.dev when `zone` is empty). The old name's
+/// Worker or DNS record goes at the next sync.
+pub fn renameGenerated(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, id: []const u8, label: []const u8, zone: []const u8, failure: *Failure) ![]const u8 {
+    const svc = try store.load(id);
+    if (generatedOf(store.settings(), svc).len == 0) return error.NotGenerated;
+    return placeGenerated(a, gpa, io, key, store, id, label, zone, failure);
+}
+
+/// The service's generated name, also one made before it was recorded.
+pub fn generatedOf(s: store_mod.Settings, svc: store_mod.Service) []const u8 {
+    if (svc.generated_domain.len > 0) return svc.generated_domain;
+    for (svc.domains) |d| if (isRelayHost(s, d)) return d;
+    return "";
+}
+
+fn placeGenerated(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, id: []const u8, label: []const u8, zone: []const u8, failure: *Failure) ![]const u8 {
+    if (!validLabel(label)) return error.BadLabel;
     var host: []const u8 = undefined;
-    if (settings.generated_zone.len > 0) {
+    if (zone.len > 0) {
+        var known = false;
+        for (load(store).zones) |z| known = known or std.ascii.eqlIgnoreCase(z, zone);
+        if (!known) return error.UnknownZone;
         // One level below the zone: Cloudflare's free certificate covers it.
-        host = try std.fmt.allocPrint(a, "{s}.{s}", .{ uid, settings.generated_zone });
+        host = try std.fmt.allocPrint(a, "{s}.{s}", .{ label, zone });
+        if (try store.domainOwner(store.settings(), host, id)) |_| return error.NameTaken;
     } else {
         try ensureRelay(a, gpa, io, key, store, failure);
         var cf = try client(a, gpa, io, key, store);
         errdefer failure.message = cf.message;
         const s = store.settings();
-        host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ uid, s.relay_subdomain });
-        try cf.uploadWorker(a, s.cloudflare_account, uid, try serviceMetadata(a, s.relay_hub), relay.worker_js);
-        try cf.enableWorkersDev(a, s.cloudflare_account, uid);
+        host = try std.fmt.allocPrint(a, "{s}.{s}.workers.dev", .{ label, s.relay_subdomain });
+        if (std.mem.eql(u8, label, s.relay_hub)) return error.NameTaken;
+        if (try store.domainOwner(s, host, id)) |_| return error.NameTaken;
         var state = load(store);
-        var names: std.ArrayList([]const u8) = .empty;
-        try names.appendSlice(a, state.relay_scripts);
-        try names.append(a, uid);
-        state.relay_scripts = names.items;
-        save(store, state);
+        var ours = false;
+        for (state.relay_scripts) |n| ours = ours or std.mem.eql(u8, n, label);
+        // Never overwrite a Worker of the account that PocketHarbor did not make.
+        if (!ours) for (try cf.workerNames(a, s.cloudflare_account)) |n| {
+            if (std.mem.eql(u8, n, label)) return error.NameTaken;
+        };
+        try cf.uploadWorker(a, s.cloudflare_account, label, try serviceMetadata(a, s.relay_hub), relay.worker_js);
+        try cf.enableWorkersDev(a, s.cloudflare_account, label);
+        if (!ours) {
+            var names: std.ArrayList([]const u8) = .empty;
+            try names.appendSlice(a, state.relay_scripts);
+            try names.append(a, label);
+            state.relay_scripts = names.items;
+            save(store, state);
+        }
     }
     {
         const lock = try store.lock();
         defer store.unlock(lock);
         var current = try store.load(id);
+        const old = generatedOf(store.settings(), current);
         var list: std.ArrayList([]const u8) = .empty;
-        try list.appendSlice(a, current.domains);
+        for (current.domains) |d| if (old.len == 0 or !std.ascii.eqlIgnoreCase(d, old)) try list.append(a, d);
         try list.append(a, host);
         current.domains = list.items;
         current.generated_domain = host;
@@ -623,6 +668,17 @@ test "the hub is never one of the services' Workers" {
     try std.testing.expectEqual(@as(usize, 2), got.len);
     try std.testing.expectEqualStrings("shop-web-02f48b", got[0]);
     try std.testing.expectEqualStrings("api-02f48b", got[1]);
+}
+
+test "labels of generated names" {
+    try std.testing.expect(validLabel("ph-0a1b2c3d4e"));
+    try std.testing.expect(validLabel("shop"));
+    try std.testing.expect(!validLabel(""));
+    try std.testing.expect(!validLabel("-shop"));
+    try std.testing.expect(!validLabel("shop-"));
+    try std.testing.expect(!validLabel("Shop"));
+    try std.testing.expect(!validLabel("a.b"));
+    try std.testing.expect(!validLabel("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 }
 
 test "names move with a renamed workers.dev subdomain" {

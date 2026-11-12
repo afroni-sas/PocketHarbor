@@ -11,6 +11,7 @@ const deploy = @import("deploy.zig");
 const store_mod = @import("store.zig");
 const vars_mod = @import("vars.zig");
 const github = @import("github.zig");
+const hooks = @import("hooks.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
@@ -332,6 +333,8 @@ const ServiceView = struct {
     branch: []const u8,
     root_dir: []const u8,
     auto_deploy: bool,
+    /// Whether pushes reach the phone: the repository's webhook.
+    deploy_on_push: ?hooks.Entry,
     build_command: []const u8,
     start_command: []const u8,
     pre_deploy: []const u8,
@@ -387,6 +390,7 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .branch = svc.branch,
         .root_dir = svc.root_dir,
         .auto_deploy = svc.auto_deploy,
+        .deploy_on_push = hooks.statusOf(c.store, svc),
         .build_command = svc.build_command,
         .start_command = svc.start_command,
         .pre_deploy = svc.pre_deploy,
@@ -519,6 +523,7 @@ fn domainsView(c: *Ctx, svc: Service) !void {
     return c.res.json(200, .{
         .managed = managed,
         .relay_ready = managed and s.relay_url.len > 0,
+        .relay_suffix = if (managed and s.relay_subdomain.len > 0) try std.fmt.allocPrint(c.a, "{s}.workers.dev", .{s.relay_subdomain}) else "",
         .generates_in = if (managed) s.generated_zone else "",
         .relay_error = state.relay_error,
         .saas_zone = s.cloudflare_saas_zone,
@@ -631,6 +636,22 @@ fn syncEdge(c: *Ctx) void {
     _ = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch {};
 }
 
+/// Puts the repositories' push webhooks in step: after a change of the
+/// GitHub token, of Cloudflare, or of what the services deploy from.
+fn syncHooks(c: *Ctx) void {
+    const secret = webhookSecret(c) catch return;
+    _ = hooks.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, secret, envValue(c.panel.envp, "PHARBOR_GITHUB_API")) catch {};
+}
+
+fn envValue(envp: engine.Envp, name: []const u8) []const u8 {
+    var i: usize = 0;
+    while (envp[i]) |entry| : (i += 1) {
+        const e = std.mem.span(entry);
+        if (e.len > name.len and std.mem.startsWith(u8, e, name) and e[name.len] == '=') return e[name.len + 1 ..];
+    }
+    return "";
+}
+
 fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
     const create_url = cloudflare.token_url;
     if (seg.len == 0 and method(c, "GET")) {
@@ -664,6 +685,7 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
         const state = edge.connect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng, token, account, &failure) catch |e|
             return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
         startConnector(c);
+        syncHooks(c);
         return c.res.json(200, .{ .connected = true, .connector = "starting", .state = state });
     }
     if (seg.len == 0 and method(c, "PATCH")) {
@@ -699,10 +721,13 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
         const state = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch |e|
             return c.res.fail(502, if (failure.message.len > 0) failure.message else @errorName(e));
         if (eql(connectorState(c), "stopped")) startConnector(c);
+        syncHooks(c);
         return c.res.json(200, .{ .connected = true, .connector = connectorState(c), .state = state });
     }
     if (seg.len == 0 and method(c, "DELETE")) {
         edge.disconnect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng);
+        // The webhooks pointed at a name that no longer answers.
+        syncHooks(c);
         return c.res.json(200, .{ .connected = false });
     }
     c.res.fail(404, "not found");
@@ -972,6 +997,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         }
         if (in.deploy and (svc.image.len > 0 or svc.repo.len > 0)) startDeploy(c, c.store.idOf(svc), "api");
         if (in.domains != null) syncEdge(c);
+        if (svc.repo.len > 0) syncHooks(c);
         return c.res.json(201, try serviceView(c, svc));
     }
     if (seg.len == 0) return c.res.fail(405, "method not allowed");
@@ -998,13 +1024,20 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
             c.store.unlock(lock);
             if (in.deploy) startDeploy(c, id, "api");
             if (in.domains != null) syncEdge(c);
+            if (in.repo != null or in.auto_deploy != null) syncHooks(c);
             return c.res.json(200, try serviceView(c, current));
         }
         if (method(c, "DELETE")) {
-            const lock = try c.store.lock();
-            defer c.store.unlock(lock);
-            deploy.forget(c.store, &c.eng, c.vars, svc);
-            c.store.syncRoutes();
+            {
+                const lock = try c.store.lock();
+                defer c.store.unlock(lock);
+                deploy.forget(c.store, &c.eng, c.vars, svc);
+                c.store.syncRoutes();
+            }
+            // Its names leave Cloudflare, and its repository's webhook goes
+            // when nothing else deploys from it.
+            if (svc.domains.len > 0) syncEdge(c);
+            if (svc.repo.len > 0) syncHooks(c);
             return c.res.json(200, .{ .ok = true });
         }
         return c.res.fail(405, "method not allowed");
@@ -1018,6 +1051,20 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         const host = edge.generateDomain(c.a, c.a, c.panel.io, c.panel.key, c.store, id, &failure) catch |e| {
             if (e == error.AlreadyGenerated) return c.res.fail(409, "this service already has its generated domain: remove it to make another");
             return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
+        };
+        syncEdge(c);
+        return c.res.json(200, .{ .domain = host });
+    }
+    if (eql(what, "generate-domain") and method(c, "PUT")) {
+        if (!edge.connected(c.store)) return c.res.fail(409, "connect Cloudflare first, in Settings > Public access");
+        const body = c.req.json(struct { label: []const u8, zone: []const u8 = "" }) catch return c.res.fail(400, "send label and zone");
+        var failure: edge.Failure = .{ .err = error.None, .message = "" };
+        const host = edge.renameGenerated(c.a, c.a, c.panel.io, c.panel.key, c.store, id, std.mem.trim(u8, body.label, " "), body.zone, &failure) catch |e| return switch (e) {
+            error.NotGenerated => c.res.fail(409, "this service has no generated domain yet"),
+            error.BadLabel => c.res.fail(400, "use a-z, 0-9 and dashes, 63 characters at most"),
+            error.UnknownZone => c.res.fail(400, "that is not one of your Cloudflare zones"),
+            error.NameTaken => c.res.fail(409, "that name is already used"),
+            else => c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e)),
         };
         syncEdge(c);
         return c.res.json(200, .{ .domain = host });
@@ -1722,20 +1769,29 @@ fn githubSettings(c: *Ctx, seg: []const []const u8) !void {
         return c.res.json(200, .{ .has_token = true, .repos = list, .@"error" = "" });
     }
     if (seg.len == 0 and method(c, "GET")) {
+        const state = hooks.load(c.store);
         return c.res.json(200, .{
             .has_token = c.store.settings().github_token.len > 0,
-            .webhook_path = "/__pharbor/webhooks/github",
+            .token_url = github.token_url,
+            .webhook_path = github.webhook_path,
             .webhook_secret = try webhookSecret(c),
+            .cloudflare = edge.connected(c.store),
+            .target = try hooks.target(c.a, c.store),
+            .hooks = state.repos,
         });
     }
     if (seg.len == 0 and method(c, "PUT")) {
         const body = c.req.json(struct { token: []const u8 }) catch return c.res.fail(400, "send token");
         const lock = try c.store.lock();
-        defer c.store.unlock(lock);
+        var locked = true;
+        defer if (locked) c.store.unlock(lock);
         var s = c.store.settings();
-        s.github_token = if (body.token.len == 0) "" else try crypto.seal(c.a, c.panel.key, body.token);
+        s.github_token = if (body.token.len == 0) "" else try crypto.seal(c.a, c.panel.key, std.mem.trim(u8, body.token, " \r\n\t"));
         try c.store.saveSettings(s);
-        return c.res.json(200, .{ .has_token = body.token.len > 0 });
+        c.store.unlock(lock);
+        locked = false;
+        syncHooks(c);
+        return c.res.json(200, .{ .has_token = body.token.len > 0, .hooks = hooks.load(c.store).repos });
     }
     c.res.fail(404, "not found");
 }
@@ -1789,6 +1845,7 @@ fn settings(c: *Ctx) !void {
             c.store.syncRoutes();
         }
         syncEdge(c);
+        if (in.panel_domain != null) syncHooks(c);
         s.github_token = if (s.github_token.len > 0) "set" else "";
         s.cloudflare_token = if (s.cloudflare_token.len > 0) "set" else "";
         s.webhook_secret = "";

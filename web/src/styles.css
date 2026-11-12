@@ -333,6 +333,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .net-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); }
 .net-list > .net-row:first-child { border-top: 0; }
 .net-row.open { background: var(--gray-50); }
+.net-row.busy { opacity: 0.75; }
+.net-row.busy .net-icon { display: inline-flex; align-items: center; justify-content: center; }
+.net-row.busy .spinner { width: 14px; height: 14px; }
+.net-name { font-weight: 500; }
+.domain-input { display: flex; align-items: center; gap: 6px; }
+.domain-input .input { flex: 1 1 0; min-width: 80px; }
+.domain-input .select { flex: 1 1 0; min-width: 0; text-overflow: ellipsis; }
+.domain-dot { color: var(--gray-500); }
+.push-state { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; color: var(--gray-700); line-height: 1.45; }
+.push-state .dot { flex: none; margin-top: 6px; }
 .net-icon { width: 16px; height: 16px; flex: none; color: var(--muted); }
 .net-icon.warn { color: var(--yellow); }
 .net-icon.ok { color: var(--green); }
@@ -351,11 +361,12 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .net-actions .btn.icon svg { width: 14px; height: 14px; }
 .net-form { display: flex; flex-direction: column; gap: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); margin-bottom: 12px; }
 .net-form.inline { border: 0; border-top: 1px solid var(--border); border-radius: 0; margin: 0; background: var(--gray-50); }
-.net-form > b { font-size: 14px; font-weight: 600; }
-.net-form > label { font-size: 13px; color: var(--gray-700); }
+.net-form > form { display: flex; flex-direction: column; gap: 10px; }
+.net-form > b, .net-form > form > b { font-size: 14px; font-weight: 600; }
+.net-form > label, .net-form > form > label { font-size: 13px; color: var(--gray-700); }
 .net-form .input:disabled { opacity: .55; }
-.net-foot { display: flex; align-items: center; gap: 8px; }
-.net-foot > span { flex: 1; display: inline-flex; align-items: center; gap: 6px; min-width: 0; line-height: 1.4; }
+.net-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.net-foot > span { flex: 1 1 220px; display: inline-flex; align-items: center; gap: 6px; min-width: 0; line-height: 1.4; }
 .net-foot > span svg { flex: none; }
 .net-foot > span.red { color: var(--red); }
 .net-foot > span.green { color: var(--green); }
@@ -384,6 +395,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .dns-copy:hover { background: var(--gray-100); }
 .dns-copy:hover svg { opacity: 1; }
 .badge.orange { background: hsl(25, 60%, 12%); color: hsl(25, 90%, 62%); border-color: hsl(25, 50%, 24%); }
+.token-steps a.btn svg { width: 14px; height: 14px; }
+.token-hint { margin: 8px 0 0; }
+.hook-list { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 4px; }
+.hook-list .cf-host { padding: 8px 12px; }
 .cf-paste { display: flex; gap: 8px; margin-top: 12px; }
 .cf-paste .input { flex: 1; }
 .set-card a.btn svg { width: 14px; height: 14px; }
