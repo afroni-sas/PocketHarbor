@@ -17,6 +17,8 @@ const auth_mod = @import("auth.zig");
 const vars_mod = @import("vars.zig");
 const dns = @import("dns.zig");
 const github = @import("github.zig");
+const domain_check = @import("domains.zig");
+const edge = @import("edge.zig");
 const backup = @import("backup.zig");
 const cron = @import("cron.zig");
 const scheduler = @import("scheduler.zig");
@@ -89,6 +91,7 @@ const usage =
     \\  domain add NAME HOSTNAME           Answer for a hostname (*.example.com works)
     \\  domain rm NAME HOSTNAME
     \\  domain ls
+    \\  domain check HOSTNAME [--json]    Whether a hostname reaches this PocketHarbor yet
     \\  domain base [DOMAIN|--clear]       Give every service NAME.DOMAIN
     \\  domain panel [HOST|--clear]        Where the dashboard answers, besides the phone's address
     \\
@@ -115,6 +118,9 @@ const usage =
     \\  tunnel start TOKEN                 A permanent Cloudflare tunnel
     \\  tunnel status
     \\  tunnel stop
+    \\  cloudflare connect                 Reads an API token from stdin: PocketHarbor then
+    \\                                     makes its tunnel and writes the DNS records itself
+    \\  cloudflare sync | status | disconnect
     \\
     \\  version
     \\
@@ -192,6 +198,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "project", cmdProject },
         .{ "env", cmdEnv },
         .{ "tunnel", cmdTunnel },
+        .{ "cloudflare", cmdCloudflare },
         .{ "_wake", cmdWake },
         .{ "_sleep", cmdSleep },
         .{ "_deploy", cmdDeployJob },
@@ -1165,6 +1172,7 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
         defer c.store.unlock(lock);
         try c.store.saveSettings(s);
         c.store.syncRoutes();
+        syncEdge(c);
         return;
     }
     if (eql(verb, "ls")) {
@@ -1191,6 +1199,27 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
         defer c.store.unlock(lock);
         try c.store.saveSettings(s);
         c.store.syncRoutes();
+        syncEdge(c);
+        return;
+    }
+    if (eql(verb, "check")) {
+        if (args.len < 2) die("usage: pharbor domain check HOSTNAME [--json]", .{});
+        const host: []const u8 = args[1];
+        checkDomain(host);
+        const want = try c.store.checkId();
+        const r = try domain_check.check(c.a, c.gpa, c.io, host, c.store.settings().proxy_port, want);
+        if (args.len > 2 and eql(args[2], "--json")) {
+            const json = try std.json.Stringify.valueAlloc(c.a, r, .{});
+            sys.print("{s}\n", .{json});
+            return;
+        }
+        switch (r.status) {
+            .active => sys.print("{s} reaches this PocketHarbor ({s})\n", .{ host, r.via }),
+            .dns => die("{s} does not resolve yet: add its DNS record", .{host}),
+            .cloudflare => die("{s} reaches Cloudflare, but not this tunnel: add it to the tunnel's public hostnames ({s})", .{ host, r.detail }),
+            .elsewhere => die("{s} reaches another server: {s}", .{ host, r.detail }),
+            .no_answer => die("{s} resolves, but nothing answers ({s})", .{ host, r.detail }),
+        }
         return;
     }
     var scope: Scope = .{};
@@ -1199,7 +1228,7 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
     while (i < args.len) : (i += 1) {
         if (!scope.take(args, &i)) try positional.append(c.a, args[i]);
     }
-    if (positional.items.len != 2) die("usage: pharbor domain add|rm NAME HOSTNAME", .{});
+    if (positional.items.len != 2) die("usage: pharbor domain add|rm|check NAME HOSTNAME", .{});
     const host: []const u8 = positional.items[1];
     checkDomain(host);
     const lock = try c.store.lock();
@@ -1216,11 +1245,7 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
     }
     if (eql(verb, "add")) {
         if (present) return;
-        for (try c.store.list()) |other| {
-            for (other.domains) |d| {
-                if (eql(d, host)) die("{s} already serves {s}", .{ other.name, host });
-            }
-        }
+        if (try c.store.domainOwner(c.store.settings(), host, c.store.idOf(svc))) |owner| die("{s} already answers for {s}", .{ owner, host });
         try out.append(c.a, host);
     } else if (!eql(verb, "rm")) {
         die("usage: pharbor domain add|rm NAME HOSTNAME", .{});
@@ -1230,6 +1255,66 @@ fn cmdDomain(c: *Ctx, args: []const [:0]const u8) !void {
     svc.domains = out.items;
     try c.store.save(svc);
     c.store.syncRoutes();
+    syncEdge(c);
+}
+
+fn cmdCloudflare(c: *Ctx, args: []const [:0]const u8) !void {
+    if (args.len == 0) die("usage: pharbor cloudflare connect|sync|status|disconnect", .{});
+    const verb: []const u8 = args[0];
+    const key = crypto.loadKey(c.store.root) catch die("cannot read the master key in {s}", .{c.store.root});
+    var failure: edge.Failure = .{ .err = error.None, .message = "" };
+    if (eql(verb, "connect")) {
+        const token = std.mem.trim(u8, try readSecretLine(c), " \r\n\t");
+        if (token.len < 20) die("give the API token on stdin", .{});
+        const state = edge.connect(c.a, c.gpa, c.io, key, c.store, c.eng, token, &failure) catch |e|
+            die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
+        printEdge(state);
+        return;
+    }
+    if (eql(verb, "sync")) {
+        if (!edge.connected(c.store)) die("Cloudflare is not connected: pharbor cloudflare connect", .{});
+        const state = edge.sync(c.a, c.gpa, c.io, key, c.store, &failure) catch |e|
+            die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
+        printEdge(state);
+        return;
+    }
+    if (eql(verb, "status")) {
+        if (!edge.connected(c.store)) {
+            sys.print("Not connected\n", .{});
+            return;
+        }
+        printEdge(edge.load(c.store));
+        return;
+    }
+    if (eql(verb, "disconnect")) {
+        edge.disconnect(c.a, c.gpa, c.io, key, c.store, c.eng);
+        sys.print("Disconnected; the DNS records PocketHarbor wrote are removed\n", .{});
+        return;
+    }
+    die("usage: pharbor cloudflare connect|sync|status|disconnect", .{});
+}
+
+fn printEdge(state: edge.State) void {
+    if (state.@"error".len > 0) sys.print("Last sync failed: {s}\n", .{state.@"error"});
+    for (state.hosts) |h| {
+        const what: []const u8 = switch (h.state) {
+            .ready => "ready",
+            .conflict => "left alone",
+            .no_zone => "no zone",
+            .failed => "failed",
+        };
+        sys.print("{s: <40}{s: <12}{s}\n", .{ h.host, what, h.detail });
+    }
+    if (state.hosts.len == 0) sys.print("Connected; no public name to route yet\n", .{});
+}
+
+/// After a change of public names, from the command line.
+fn syncEdge(c: *Ctx) void {
+    if (!edge.connected(c.store)) return;
+    const key = crypto.loadKey(c.store.root) catch return;
+    var failure: edge.Failure = .{ .err = error.None, .message = "" };
+    _ = edge.sync(c.a, c.gpa, c.io, key, c.store, &failure) catch
+        sys.eprint("warning: Cloudflare was not updated: {s}\n", .{failure.message});
 }
 
 fn cmdTunnel(c: *Ctx, args: []const [:0]const u8) !void {

@@ -327,7 +327,72 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .source-card .what, .domain-card .what { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .source-card .what > span:first-child, .domain-card .what > a, .domain-card .what > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-card .what a:hover { text-decoration: underline; }
-.domain-card .muted { display: inline-flex; align-items: center; gap: 4px; }
+/* Public networking, as on Railway: one list, forms in place, a DNS dialog */
+.set-group .net-hint { margin-bottom: 12px; }
+.net-list { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); margin-bottom: 12px; overflow: hidden; }
+.net-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); }
+.net-list > .net-row:first-child { border-top: 0; }
+.net-row.open { background: var(--gray-50); }
+.net-icon { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.net-icon.warn { color: var(--yellow); }
+.net-icon.ok { color: var(--green); }
+.net-what { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.net-what > a, .net-what > span:first-child { font-size: 14px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-what > a:hover { text-decoration: underline; }
+.net-name { display: inline-flex; align-items: center; gap: 8px; }
+.net-tag { padding: 0 6px; border-radius: 4px; background: var(--primary-soft); color: var(--primary-fg); font-size: 11px; line-height: 18px; }
+.net-sub { display: block; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.net-sub > svg { display: inline; vertical-align: -1px; margin-right: 3px; }
+.net-sub .mono { font-size: 11.5px; }
+.net-sub .linkish, .dns-modal .linkish { color: var(--primary-fg); font-size: inherit; text-decoration: none; }
+.net-sub .linkish.quiet { color: var(--muted); }
+.net-sub .linkish:hover { text-decoration: underline; }
+.net-actions { display: flex; gap: 0; flex: none; }
+.net-actions .btn.icon svg { width: 14px; height: 14px; }
+.net-form { display: flex; flex-direction: column; gap: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); margin-bottom: 12px; }
+.net-form.inline { border: 0; border-top: 1px solid var(--border); border-radius: 0; margin: 0; background: var(--gray-50); }
+.net-form > b { font-size: 14px; font-weight: 600; }
+.net-form > label { font-size: 13px; color: var(--gray-700); }
+.net-form .input:disabled { opacity: .55; }
+.net-foot { display: flex; align-items: center; gap: 8px; }
+.net-foot > span { flex: 1; display: inline-flex; align-items: center; gap: 6px; min-width: 0; line-height: 1.4; }
+.net-foot > span svg { flex: none; }
+.net-foot > span.red { color: var(--red); }
+.net-foot > span.green { color: var(--green); }
+.net-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.net-buttons .btn svg.accent { color: var(--primary-fg); }
+.gen-name { display: flex; align-items: stretch; }
+.gen-name .input { flex: 1; border-radius: 6px 0 0 6px; }
+.gen-name .select, .gen-zone { flex: none; max-width: 55%; border-radius: 0 6px 6px 0; border-left: 0; }
+.gen-zone { display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid var(--border); border-left: 0; background: var(--gray-50); color: var(--muted); font-size: 13px; }
+.modal.dns-modal { width: min(560px, 100%); }
+.dns-modal .body { display: flex; flex-direction: column; gap: 14px; }
+.dns-modal .body > p { margin: 0; line-height: 1.55; font-size: 14px; }
+.dns-modal .zone { color: var(--primary-fg); }
+.dns-modal footer { align-items: center; }
+.dns-table { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.dns-row { display: grid; grid-template-columns: 88px minmax(70px, 1fr) minmax(0, 2.2fr); gap: 10px; align-items: center; padding: 9px 12px; border-top: 1px solid var(--border); font-size: 13px; }
+.dns-row:first-child { border-top: 0; }
+.dns-row.head { font-size: 12px; color: var(--muted); }
+.dns-row > span:last-child { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dns-type { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12.5px; }
+.dns-type .warn { color: var(--yellow); }
+.dns-type .ok { color: var(--green); }
+.dns-copy { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 2px 6px; margin: -2px -6px; border: 0; border-radius: 5px; background: none; color: var(--fg); font-size: 12.5px; cursor: pointer; text-align: left; }
+.dns-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dns-copy svg { width: 12px; height: 12px; flex: none; color: var(--muted); opacity: 0; }
+.dns-copy:hover { background: var(--gray-100); }
+.dns-copy:hover svg { opacity: 1; }
+.badge.orange { background: hsl(25, 60%, 12%); color: hsl(25, 90%, 62%); border-color: hsl(25, 50%, 24%); }
+.cf-steps { margin: 0 0 12px; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--gray-700); line-height: 1.5; }
+.cf-steps a { color: var(--primary-fg); }
+.cf-hosts { display: flex; flex-direction: column; margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.cf-host { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 8px 12px; border-top: 1px solid var(--border); font-size: 13px; }
+.cf-host:first-child { border-top: 0; }
+.cf-host .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cf-detail { flex-basis: 100%; padding-left: 18px; }
+.btn.danger-solid { background: hsl(0, 62%, 48%); border-color: hsl(0, 62%, 48%); color: #fff; }
+.btn.danger-solid:hover { background: hsl(0, 62%, 54%); }
 .domain-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2); margin-bottom: 8px; font-size: 13px; }
 .domain-row svg { width: 15px; height: 15px; }
 
@@ -705,6 +770,12 @@ pre.card { padding: 14px; }
   .deploy-view-head .panel-title { gap: 8px; }
   .deploy-view-date { display: none; }
   .deploy-view-tools .search { order: 0; width: auto; }
+  .dns-row { grid-template-columns: 76px minmax(0, 1fr); }
+  .dns-row.head { display: none; }
+  .dns-row > span:nth-child(3) { grid-column: 1 / -1; }
+  .net-foot { flex-wrap: wrap; }
+  .net-foot > span { flex-basis: 100%; }
+  .net-row { padding: 10px 12px; }
   .deploy-view-tools, .deploy-view-body .logs, .deploy-view-body .logs-foot { padding-left: 12px; padding-right: 12px; }
   .detail-grid { grid-template-columns: 1fr; }
   .panel-head { padding: 20px 16px 0; }

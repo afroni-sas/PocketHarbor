@@ -20,6 +20,11 @@ const terminal = @import("terminal.zig");
 const alerts = @import("alerts.zig");
 const templates = @import("templates.zig");
 const dbview = @import("dbview.zig");
+const domains = @import("domains.zig");
+const tunnel_mod = @import("tunnel.zig");
+const net = @import("net.zig");
+const edge = @import("edge.zig");
+const cloudflare = @import("cloudflare.zig");
 const Store = store_mod.Store;
 const Service = store_mod.Service;
 const Request = httpd.Request;
@@ -78,6 +83,12 @@ pub fn handle(raw: *anyopaque, req: *Request, res: *Response) void {
     };
     if (std.mem.eql(u8, req.path, "/__pharbor/webhooks/github")) {
         return webhook(&c) catch |e| res.fail(500, @errorName(e));
+    }
+    // Any hostname that reaches this proxy gets here: domain checks ask it.
+    if (std.mem.eql(u8, req.path, domains.check_path)) {
+        res.addHeader("Cache-Control", "no-store");
+        const id = store.checkId() catch return res.fail(500, "no check id");
+        return res.send(200, "text/plain; charset=utf-8", id);
     }
     if (!std.mem.startsWith(u8, req.path, "/api/")) return serveAsset(&c);
     route(&c) catch |e| {
@@ -176,6 +187,8 @@ fn route(c: *Ctx) !void {
     if (eql(seg[0], "services")) return services(c, seg[1..]);
     if (eql(seg[0], "settings")) return settings(c);
     if (eql(seg[0], "github")) return githubSettings(c, seg[1..]);
+    if (eql(seg[0], "cloudflare")) return cloudflareApi(c, seg[1..]);
+    if (eql(seg[0], "domain-check") and method(c, "GET")) return domainName(c);
     if (eql(seg[0], "registries")) return registries(c, seg[1..]);
     if (eql(seg[0], "tunnel")) return tunnelApi(c, seg[1..]);
     if (eql(seg[0], "alerts")) return alertsApi(c, seg[1..]);
@@ -394,6 +407,239 @@ fn serviceView(c: *Ctx, svc: Service) !ServiceView {
         .x = svc.x,
         .y = svc.y,
     };
+}
+
+/// Answers 409 when a domain the input gives already belongs to something else.
+fn domainTaken(c: *Ctx, svc: Service, in: ServiceInput) !bool {
+    const list = in.domains orelse return false;
+    const s = c.store.settings();
+    for (list) |d| {
+        if (try c.store.domainOwner(s, d, c.store.idOf(svc))) |owner| {
+            c.res.fail(409, try std.fmt.allocPrint(c.a, "{s} is already used by {s}", .{ d, owner }));
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Each public name of a service, with the DNS record it needs and, with
+/// ?check=1, whether it reaches this installation yet.
+fn domainsView(c: *Ctx, svc: Service) !void {
+    const s = c.store.settings();
+    const managed = edge.connected(c.store);
+    const state = if (managed) edge.load(c.store) else edge.State{};
+    const reach: domains.Setup = if (s.tunnel_id.len > 0)
+        .{ .tunnel = s.tunnel_id }
+    else if (net.lanAddress()) |ip|
+        .{ .lan = ip }
+    else
+        .none;
+    const View = struct {
+        domain: []const u8,
+        /// "custom", or "base" for NAME.base_domain.
+        kind: []const u8,
+        records: []const domains.Record,
+        /// The zone the record goes in.
+        zone: []const u8,
+        /// With Cloudflare connected: what the last sync did for the name.
+        record: ?cloudflare.RecordState = null,
+        record_detail: []const u8 = "",
+        /// False when Cloudflare's free certificate would not cover it.
+        certificate: bool = true,
+        status: ?domains.Status = null,
+        via: []const u8 = "",
+        detail: []const u8 = "",
+    };
+    var out: std.ArrayList(View) = .empty;
+    var names: std.ArrayList([2][]const u8) = .empty;
+    for (svc.domains) |d| try names.append(c.a, .{ d, d });
+    if (s.base_domain.len > 0) {
+        const name = try std.fmt.allocPrint(c.a, "{s}.{s}", .{ c.store.publicLabel(svc), s.base_domain });
+        try names.append(c.a, .{ name, try std.fmt.allocPrint(c.a, "*.{s}", .{s.base_domain}) });
+    }
+    for (names.items, 0..) |pair, i| {
+        const kind: []const u8 = if (i < svc.domains.len) "custom" else "base";
+        var view: View = .{ .domain = pair[0], .kind = kind, .records = try domains.records(c.a, pair[1], reach), .zone = domains.split(pair[1]).zone };
+        if (managed) {
+            if (edge.outcomeOf(state, pair[1])) |o| {
+                view.record = o.state;
+                view.record_detail = o.detail;
+                if (o.zone.len > 0) {
+                    view.zone = o.zone;
+                    view.certificate = cloudflare.certificateCovers(o.zone, pair[0]);
+                }
+            }
+            // The record as Cloudflare holds it: the full name.
+            if (view.records.len > 0) {
+                var rec = view.records[0];
+                rec.name = pair[1];
+                view.records = try c.a.dupe(domains.Record, &.{rec});
+            }
+        }
+        try out.append(c.a, view);
+    }
+    const checked = if (c.req.param("check")) |v| eql(v, "1") else false;
+    if (checked and out.items.len > 0) {
+        _ = try c.store.checkId();
+        const hosts = try c.a.alloc([]const u8, out.items.len);
+        for (out.items, 0..) |v, i| hosts[i] = v.domain;
+        const results = try checkAll(c, hosts);
+        for (out.items, results) |*v, r| {
+            v.status = r.status;
+            v.via = r.via;
+            v.detail = r.detail;
+        }
+    }
+    var lan_buf: [16]u8 = undefined;
+    const lan: []const u8 = switch (reach) {
+        .lan => |ip| try std.fmt.bufPrint(&lan_buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }),
+        else => "",
+    };
+    return c.res.json(200, .{
+        .managed = managed,
+        .synced_at = state.synced_at,
+        .sync_error = state.@"error",
+        .zones = state.zones,
+        .setup = @tagName(reach),
+        .origin = try tunnel_mod.originUrl(c.store),
+        .proxy_port = s.proxy_port,
+        .lan = lan,
+        .checked = checked,
+        .domains = out.items,
+    });
+}
+
+/// Runs `pharbor domain check` for each host at once, each in its own
+/// process, so that a name that hangs costs at most the deadline.
+fn checkAll(c: *Ctx, hosts: []const []const u8) ![]domains.Result {
+    // A DNS lookup and three attempts, of four seconds at most each.
+    const deadline_ms: i64 = 18_000;
+    const Job = struct { pid: i32, fd: i32, text: std.ArrayList(u8) = .empty, done: bool = false };
+    const jobs = try c.a.alloc(Job, hosts.len);
+    for (hosts, 0..) |h, i| {
+        var pipe: [2]i32 = undefined;
+        _ = try sys.ck(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+        const argv = [_:null]?[*:0]const u8{ "pharbor", "domain", "check", (try c.a.dupeSentinel(u8, h, 0)).ptr, "--json" };
+        const pid = try sys.fork();
+        if (pid == 0) {
+            _ = linux.dup2(pipe[1], 1);
+            _ = linux.execve("/proc/self/exe", &argv, c.panel.envp);
+            linux.exit_group(127);
+        }
+        sys.close(pipe[1]);
+        jobs[i] = .{ .pid = pid, .fd = pipe[0] };
+    }
+    const start = sys.monoNs();
+    var open = jobs.len;
+    var buf: [4096]u8 = undefined;
+    while (open > 0) {
+        const elapsed: i64 = @intCast(@divFloor(sys.monoNs() - start, std.time.ns_per_ms));
+        if (elapsed >= deadline_ms) break;
+        var fds: [32]linux.pollfd = undefined;
+        var map: [32]usize = undefined;
+        var n: usize = 0;
+        for (jobs, 0..) |j, i| {
+            if (j.done or n == fds.len) continue;
+            fds[n] = .{ .fd = j.fd, .events = linux.POLL.IN, .revents = 0 };
+            map[n] = i;
+            n += 1;
+        }
+        const rc = linux.poll(&fds, n, @intCast(deadline_ms - elapsed));
+        if (linux.errno(rc) != .SUCCESS) continue;
+        for (fds[0..n], map[0..n]) |p, i| {
+            if (p.revents == 0) continue;
+            const got = sys.read(jobs[i].fd, &buf) catch 0;
+            if (got == 0) {
+                jobs[i].done = true;
+                open -= 1;
+            } else {
+                try jobs[i].text.appendSlice(c.a, buf[0..got]);
+            }
+        }
+    }
+    const out = try c.a.alloc(domains.Result, jobs.len);
+    for (jobs, 0..) |*j, i| {
+        if (!j.done) _ = linux.kill(j.pid, .KILL);
+        sys.close(j.fd);
+        var status: i32 = 0;
+        _ = linux.waitpid(j.pid, &status, 0);
+        out[i] = if (j.done)
+            std.json.parseFromSliceLeaky(domains.Result, c.a, j.text.items, .{ .ignore_unknown_fields = true }) catch
+                .{ .status = .no_answer, .detail = "the check failed" }
+        else
+            .{ .status = .no_answer, .detail = "no answer within 18 seconds" };
+    }
+    return out;
+}
+
+/// What the Add Custom Domain form says while typing: whether the name is
+/// free, and with Cloudflare connected, which zone would hold its record.
+fn domainName(c: *Ctx) !void {
+    const name = c.req.param("name") orelse return c.res.fail(400, "send name");
+    if (!store_mod.validDomain(name) or eql(name, "*")) return c.res.json(200, .{ .valid = false });
+    const except = c.req.param("service") orelse "";
+    const s = c.store.settings();
+    const owner = try c.store.domainOwner(s, name, except);
+    const managed = edge.connected(c.store);
+    var zone: []const u8 = "";
+    if (managed) {
+        for (edge.load(c.store).zones) |z| {
+            const inside = std.ascii.eqlIgnoreCase(name, z) or (name.len > z.len and std.ascii.endsWithIgnoreCase(name, z) and name[name.len - z.len - 1] == '.');
+            if (inside and z.len > zone.len) zone = z;
+        }
+    }
+    return c.res.json(200, .{
+        .valid = true,
+        .owner = owner,
+        .managed = managed,
+        .zone = zone,
+        .certificate = zone.len == 0 or cloudflare.certificateCovers(zone, name),
+    });
+}
+
+/// Brings Cloudflare in step after a change of public names; a failure is
+/// kept in cloudflare.json, where the dashboard shows it.
+fn syncEdge(c: *Ctx) void {
+    if (!edge.connected(c.store)) return;
+    var failure: edge.Failure = .{ .err = error.None, .message = "" };
+    _ = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch {};
+}
+
+fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
+    const create_url = "https://dash.cloudflare.com/profile/api-tokens";
+    if (seg.len == 0 and method(c, "GET")) {
+        const s = c.store.settings();
+        const state = edge.load(c.store);
+        return c.res.json(200, .{
+            .connected = edge.connected(c.store),
+            .account = s.cloudflare_account,
+            .tunnel_id = s.tunnel_id,
+            .origin = try tunnel_mod.originUrl(c.store),
+            .permissions = cloudflare.token_permissions,
+            .create_url = create_url,
+            .state = state,
+        });
+    }
+    var failure: edge.Failure = .{ .err = error.None, .message = "" };
+    if (seg.len == 0 and method(c, "PUT")) {
+        const body = c.req.json(struct { token: []const u8 }) catch return c.res.fail(400, "send token");
+        const token = std.mem.trim(u8, body.token, " \r\n\t");
+        if (token.len < 20) return c.res.fail(400, "that is not a Cloudflare API token");
+        const state = edge.connect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng, token, &failure) catch |e|
+            return c.res.fail(if (e == error.CloudflareRefused) 403 else 502, if (failure.message.len > 0) failure.message else @errorName(e));
+        return c.res.json(200, .{ .connected = true, .state = state });
+    }
+    if (seg.len == 1 and eql(seg[0], "sync") and method(c, "POST")) {
+        if (!edge.connected(c.store)) return c.res.fail(409, "Cloudflare is not connected");
+        const state = edge.sync(c.a, c.a, c.panel.io, c.panel.key, c.store, &failure) catch |e|
+            return c.res.fail(502, if (failure.message.len > 0) failure.message else @errorName(e));
+        return c.res.json(200, .{ .connected = true, .state = state });
+    }
+    if (seg.len == 0 and method(c, "DELETE")) {
+        edge.disconnect(c.a, c.a, c.panel.io, c.panel.key, c.store, &c.eng);
+        return c.res.json(200, .{ .connected = false });
+    }
+    c.res.fail(404, "not found");
 }
 
 fn validName(name: []const u8) bool {
@@ -624,6 +870,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
         for ([_][]const u8{ name, project, env }) |n| if (!validName(n)) return c.res.fail(400, "names use a-z, 0-9 and -");
         var svc: Service = .{ .name = name, .project = project, .environment = env };
         applyInput(&svc, in) catch |e| return c.res.fail(400, @errorName(e));
+        if (try domainTaken(c, svc, in)) return;
         {
             const lock = try c.store.lock();
             defer c.store.unlock(lock);
@@ -636,6 +883,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
             }
         }
         if (in.deploy and (svc.image.len > 0 or svc.repo.len > 0)) startDeploy(c, c.store.idOf(svc), "api");
+        if (in.domains != null) syncEdge(c);
         return c.res.json(201, try serviceView(c, svc));
     }
     if (seg.len == 0) return c.res.fail(405, "method not allowed");
@@ -653,10 +901,15 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
                 c.store.unlock(lock);
                 return c.res.fail(400, @errorName(e));
             };
+            if (try domainTaken(c, current, in)) {
+                c.store.unlock(lock);
+                return;
+            }
             try c.store.save(current);
             c.store.syncRoutes();
             c.store.unlock(lock);
             if (in.deploy) startDeploy(c, id, "api");
+            if (in.domains != null) syncEdge(c);
             return c.res.json(200, try serviceView(c, current));
         }
         if (method(c, "DELETE")) {
@@ -670,6 +923,7 @@ fn services(c: *Ctx, seg: []const []const u8) !void {
     }
     const what = seg[1];
     if (eql(what, "variables")) return variables(c, svc.project, svc.environment, svc.name, seg[2..]);
+    if (eql(what, "domains") and seg.len == 2 and method(c, "GET")) return domainsView(c, svc);
     if (eql(what, "deploy") and method(c, "POST")) {
         if (svc.image.len == 0 and svc.repo.len == 0) return c.res.fail(400, "set an image or a repository first");
         startDeploy(c, id, "api");
@@ -1412,24 +1666,32 @@ fn settings(c: *Ctx) !void {
         var s = c.store.settings();
         // Never sent back; the GitHub endpoint says whether they are set.
         s.github_token = if (s.github_token.len > 0) "set" else "";
+        s.cloudflare_token = if (s.cloudflare_token.len > 0) "set" else "";
         s.webhook_secret = "";
         return c.res.json(200, s);
     }
     if (method(c, "PATCH")) {
         const in = c.req.json(struct { base_domain: ?[]const u8 = null, panel_domain: ?[]const u8 = null }) catch return c.res.fail(400, "invalid settings");
-        const lock = try c.store.lock();
-        defer c.store.unlock(lock);
         var s = c.store.settings();
-        if (in.base_domain) |d| {
-            if (d.len > 0 and !store_mod.validDomain(d)) return c.res.fail(400, "invalid domain");
-            s.base_domain = d;
+        {
+            const lock = try c.store.lock();
+            defer c.store.unlock(lock);
+            s = c.store.settings();
+            if (in.base_domain) |d| {
+                if (d.len > 0 and !store_mod.validDomain(d)) return c.res.fail(400, "invalid domain");
+                s.base_domain = d;
+            }
+            if (in.panel_domain) |d| {
+                if (d.len > 0 and !store_mod.validDomain(d)) return c.res.fail(400, "invalid domain");
+                s.panel_domain = d;
+            }
+            try c.store.saveSettings(s);
+            c.store.syncRoutes();
         }
-        if (in.panel_domain) |d| {
-            if (d.len > 0 and !store_mod.validDomain(d)) return c.res.fail(400, "invalid domain");
-            s.panel_domain = d;
-        }
-        try c.store.saveSettings(s);
-        c.store.syncRoutes();
+        syncEdge(c);
+        s.github_token = if (s.github_token.len > 0) "set" else "";
+        s.cloudflare_token = if (s.cloudflare_token.len > 0) "set" else "";
+        s.webhook_secret = "";
         return c.res.json(200, s);
     }
     c.res.fail(405, "method not allowed");

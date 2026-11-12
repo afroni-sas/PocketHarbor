@@ -12,7 +12,6 @@ import {
   Clock,
   Code,
   Copy,
-  CornerDownRight,
   EllipsisVertical,
   ExternalLink,
   FileText,
@@ -30,6 +29,7 @@ import {
   Search,
   Smartphone,
   Trash,
+  Zap,
   TriangleExclamationPoint,
   Undo2,
   X,
@@ -43,6 +43,7 @@ import { LogsView } from './Logs.jsx'
 import { MetricsTab } from './Metrics.jsx'
 import { ConsoleTab } from './Console.jsx'
 import { DataTab, dbKind } from './Data.jsx'
+import { loadDomains, PrivateNetworking, PublicNetworking } from './Domains.jsx'
 
 const deployments = signal({ id: '', list: null })
 const backups = signal({ id: '', volumes: null, list: null })
@@ -110,7 +111,7 @@ const loaders = {
   ],
   backups: [loadBackups, 0],
   runs: [loadRuns, 4000],
-  settings: [loadSettings, 0],
+  settings: [(id, repeat) => (repeat || loadSettings(id), loadDomains(id, repeat)), 20000],
 }
 
 let timer = 0
@@ -123,7 +124,7 @@ effect(() => {
   if (!entry) return
   const [load, every] = entry
   untracked(() => load(id))
-  if (every) timer = setInterval(() => document.hidden || load(id), every)
+  if (every) timer = setInterval(() => document.hidden || load(id, true), every)
 })
 
 addEventListener('keydown', (e) => {
@@ -682,24 +683,6 @@ function connect(svc, kind) {
   })
 }
 
-function addDomain(svc) {
-  openForm({
-    title: 'Custom domain',
-    submit: 'Add',
-    render: () => (
-      <div class="field">
-        <label for="domain">Domain</label>
-        <input class="input mono" id="domain" name="domain" placeholder="app.example.com" required autofocus />
-        <span class="hint">Point its DNS to this phone, or route it through your Cloudflare tunnel.</span>
-      </div>
-    ),
-    onSubmit: async ({ domain }) => {
-      await update(svc, { domains: [...svc.domains, domain.trim().toLowerCase()] }, true)
-      toast('Domain added', 'success')
-    },
-  })
-}
-
 async function generateDomain(svc) {
   await attempt(async () => {
     const res = await post('/tunnel/quick', { service: svc.id })
@@ -868,76 +851,11 @@ function Settings({ svc }) {
         </Section>
 
         <Section id="networking" icon={Network} title="Networking" keys="domain public private port tunnel">
-          <Group label="Public Networking" hint="Where the service answers outside the phone." keys="domain public tunnel">
-            {svc.hostnames.map((h) => (
-              <div class="domain-card" key={h}>
-                <Globe />
-                <div class="what">
-                  {h === '*' ? <span>Any other hostname</span> : <a class="mono" href={`http://${h}`} target="_blank" rel="noreferrer">{h}</a>}
-                  <span class="muted small">
-                    <CornerDownRight width={12} height={12} /> Port {svc.port || 8080}
-                    {h === '*' && ' · the default service'}
-                    {svc.domains.includes(h) ? ' · custom domain' : h !== '*' ? ' · from the base domain' : ''}
-                  </span>
-                </div>
-                {h !== '*' && (
-                  <button class="btn ghost icon sm" aria-label={`Copy ${h}`} title="Copy" onClick={() => copy(h)}>
-                    <Copy />
-                  </button>
-                )}
-                {svc.domains.includes(h) && (
-                  <button
-                    class="btn ghost icon sm"
-                    aria-label={`Remove ${h}`}
-                    title="Remove"
-                    onClick={() =>
-                      confirm({
-                        title: `Remove ${h}?`,
-                        body: 'The service stops answering at this hostname.',
-                        action: 'Remove',
-                        onConfirm: () => update(svc, { domains: svc.domains.filter((d) => d !== h) }, true),
-                      })
-                    }
-                  >
-                    <Trash />
-                  </button>
-                )}
-              </div>
-            ))}
-            {t && t.url && t.default_service === svc.id && (
-              <div class="domain-row">
-                <Globe color="var(--green)" />
-                <a class="mono" href={t.url} target="_blank" rel="noreferrer">
-                  {t.url}
-                </a>
-                <span class="badge green">Tunnel</span>
-                <span class="spacer" />
-                <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(t.url)}>
-                  <Copy />
-                </button>
-              </div>
-            )}
-            <div class="row">
-              <button class="btn sm" onClick={() => generateDomain(svc)}>
-                <Globe /> Generate Domain
-              </button>
-              <button class="btn sm" onClick={() => addDomain(svc)}>
-                <Plus /> Custom Domain
-              </button>
-            </div>
-            <p class="muted small" style="margin:8px 0 0">Generate Domain opens a Cloudflare quick tunnel to this service.</p>
+          <Group label="Public Networking" keys="domain custom public tunnel dns generate">
+            <PublicNetworking svc={svc} update={update} quickTunnel={generateDomain} label={privateName(svc)} quick={t && t.url && t.default_service === svc.id ? t.url : ''} />
           </Group>
-          <Group label="Port" hint="The port the app listens on; PORT is set to it. 8080 when empty." keys="port">
-            <Text svc={svc} field="port" placeholder="8080" number />
-          </Group>
-          <Group label="Private Networking" hint="Other services of this environment reach it at this name." keys="private internal dns">
-            <div class="code-box">
-              {privateName(svc)}:{svc.port || 8080}
-              <span class="spacer" />
-              <button class="btn ghost icon sm" aria-label="Copy" onClick={() => copy(`${privateName(svc)}:${svc.port || 8080}`)}>
-                <Copy />
-              </button>
-            </div>
+          <Group label="Private Networking" hint="Communicate with this service from within the phone's private network." keys="private internal dns port">
+            <PrivateNetworking svc={svc} update={update} />
           </Group>
         </Section>
 

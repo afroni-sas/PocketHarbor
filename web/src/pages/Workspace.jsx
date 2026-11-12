@@ -17,8 +17,8 @@ const starting = signal(false)
 const loaders = {
   general: async () => ({ settings: await get('/settings') }),
   networking: async () => {
-    const [tunnel, services, settings] = await Promise.all([get('/tunnel'), get('/services'), get('/settings')])
-    return { tunnel, services, settings }
+    const [tunnel, services, settings, cloudflare] = await Promise.all([get('/tunnel'), get('/services'), get('/settings'), get('/cloudflare')])
+    return { tunnel, services, settings, cloudflare }
   },
   github: async () => ({ github: await get('/github') }),
   registries: async () => ({ registries: await get('/registries') }),
@@ -153,12 +153,132 @@ function stopTunnel() {
   })
 }
 
+async function connectCloudflare(e) {
+  e.preventDefault()
+  const form = e.currentTarget
+  const token = form.elements.token.value.trim()
+  starting.value = true
+  try {
+    await put('/cloudflare', { token })
+    form.reset()
+    toast('Cloudflare connected', 'success')
+    await load('networking')
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    starting.value = false
+  }
+}
+
+async function syncCloudflare() {
+  starting.value = true
+  try {
+    await post('/cloudflare/sync')
+    await load('networking')
+    toast('Cloudflare is up to date', 'success')
+  } catch (err) {
+    toast(err.message, 'error')
+    await load('networking')
+  } finally {
+    starting.value = false
+  }
+}
+
+function disconnectCloudflare() {
+  confirm({
+    title: 'Disconnect Cloudflare?',
+    body: 'The DNS records PocketHarbor wrote are removed and its tunnel stops: your domains stop answering from the internet. Their services keep running.',
+    action: 'Disconnect',
+    onConfirm: async () => {
+      await del('/cloudflare')
+      await load('networking')
+    },
+  })
+}
+
+const recordWords = { ready: 'Ready', conflict: 'Left alone', no_zone: 'No zone', failed: 'Failed' }
+
+function CloudflareCard() {
+  const cf = data.value.cloudflare
+  if (!cf) return null
+  const busy = starting.value
+  const st = cf.state || {}
+  return (
+    <section class="card card-pad set-card">
+      <h3>Cloudflare</h3>
+      {cf.connected ? (
+        <>
+          <div class="domain-row">
+            <span class={`dot ${st.error ? 'yellow' : 'green'}`} />
+            <span style="flex:1">
+              Connected · tunnel <span class="mono">{cf.tunnel_id.slice(0, 8)}</span>
+              {st.synced_at ? ` · synced ${timeAgo(st.synced_at)}` : ''}
+            </span>
+            <button class="btn sm" onClick={syncCloudflare} disabled={busy}>
+              {busy && <span class="spinner" style="width:12px;height:12px" />} Sync now
+            </button>
+            <button class="btn sm danger" onClick={disconnectCloudflare} disabled={busy}>
+              Disconnect
+            </button>
+          </div>
+          {st.error && <div class="banner warn">{st.error}</div>}
+          <p class="muted small" style="margin:8px 0 0">
+            {st.zones && st.zones.length
+              ? `Your zones: ${st.zones.join(', ')}. A custom domain under them gets its DNS record and its route through the tunnel by itself.`
+              : 'The token sees no zone yet: add a domain to your Cloudflare account, then press Sync now.'}
+          </p>
+          {st.hosts && st.hosts.length > 0 && (
+            <div class="cf-hosts">
+              {st.hosts.map((h) => (
+                <div class="cf-host" key={h.host}>
+                  <span class={`dot ${h.state === 'ready' ? 'green' : 'yellow'}`} />
+                  <span class="mono">{h.host}</span>
+                  <span class="muted small">{recordWords[h.state]}</span>
+                  {h.detail && <span class="muted small cf-detail">{h.detail}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <p class="muted small" style="margin:-6px 0 12px">
+            Connect your Cloudflare account and PocketHarbor sets up everything itself: its tunnel, a route for each domain, and their DNS records. Domains then answer from the internet over HTTPS, with no port to open, even behind a carrier's network.
+          </p>
+          <ol class="cf-steps">
+            <li>
+              Open{' '}
+              <a href={cf.create_url} target="_blank" rel="noreferrer">
+                Cloudflare › My Profile › API Tokens
+              </a>
+              , Create Token, Create Custom Token.
+            </li>
+            <li>
+              Give it these permissions: <span class="mono">{cf.permissions}</span>.
+            </li>
+            <li>Paste the token here. It is stored encrypted on this phone.</li>
+          </ol>
+          <form class="row" onSubmit={connectCloudflare}>
+            <input class="input mono" name="token" type="password" placeholder="Cloudflare API token" required autocomplete="off" style="flex:1" />
+            <button class="btn primary" disabled={busy}>
+              {busy && <span class="spinner" style="width:13px;height:13px" />}
+              Connect
+            </button>
+          </form>
+        </>
+      )}
+    </section>
+  )
+}
+
 function Networking() {
   const { tunnel, services } = data.value
   if (!tunnel || !services) return <Spinner />
   const busy = starting.value
+  const managed = data.value.cloudflare && data.value.cloudflare.connected
   return (
     <>
+      <CloudflareCard />
       <section class="card card-pad set-card">
         <h3>Cloudflare tunnel</h3>
         {tunnel.running ? (
@@ -205,8 +325,9 @@ function Networking() {
           </button>
         </form>
       </section>
+      {!managed && (
       <section class="card card-pad set-card">
-        <h3>Named tunnel</h3>
+        <h3>Tunnel token</h3>
         <p class="muted small" style="margin:-6px 0 12px">
           Your own domains through a tunnel of your Cloudflare account. Create it in Zero Trust, route its hostnames to http://localhost:{data.value.settings?.proxy_port || 8080}, then paste its token.
         </p>
@@ -217,6 +338,7 @@ function Networking() {
           </button>
         </form>
       </section>
+      )}
     </>
   )
 }

@@ -107,6 +107,15 @@ pub const Settings = struct {
     github_token: []const u8 = "",
     /// Encrypted. GitHub signs webhook deliveries with it.
     webhook_secret: []const u8 = "",
+    /// What /__pharbor/check answers, so that a domain check knows it
+    /// reached this installation and not another server.
+    check_id: []const u8 = "",
+    /// The Cloudflare tunnel started with a token, for the DNS records to show.
+    tunnel_id: []const u8 = "",
+    /// Encrypted. With it PocketHarbor writes the tunnel's routes and the
+    /// DNS records of the public names itself.
+    cloudflare_token: []const u8 = "",
+    cloudflare_account: []const u8 = "",
 };
 
 /// Names end up in hostnames and file paths.
@@ -360,6 +369,30 @@ pub const Store = struct {
         }
         if (std.mem.eql(u8, s.default_service, self.idOf(svc))) try out.append(self.a, "*");
         return out.items;
+    }
+
+    /// The id /__pharbor/check answers, made on first use.
+    pub fn checkId(self: Store) ![]const u8 {
+        var s = self.settings();
+        if (s.check_id.len > 0) return s.check_id;
+        const id = try self.a.alloc(u8, 32);
+        sys.randomId(id);
+        s.check_id = id;
+        try self.saveSettings(s);
+        return id;
+    }
+
+    /// What already answers for `host`: a service's name, or "the dashboard".
+    /// `except` is the id of the service being changed.
+    pub fn domainOwner(self: Store, s: Settings, host: []const u8, except: []const u8) !?[]const u8 {
+        if (s.panel_domain.len > 0 and std.ascii.eqlIgnoreCase(s.panel_domain, host)) return "the dashboard";
+        for (try self.list()) |svc| {
+            if (std.mem.eql(u8, self.idOf(svc), except)) continue;
+            for (try self.hostnames(svc, s)) |h| {
+                if (!std.mem.eql(u8, h, "*") and std.ascii.eqlIgnoreCase(h, host)) return svc.name;
+            }
+        }
+        return null;
     }
 
     /// Writes the table the proxy serves and tells the proxy. Also the signal
