@@ -396,7 +396,7 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     sampler.detach();
     const checker = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, updates.watch, .{ c.store.root, c.eng.bin, c.envp, c.io });
     checker.detach();
-    const reviver = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, deploy.revive, .{ c.store.root, c.eng.bin, c.envp });
+    const reviver = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, deploy.revive, .{ c.store.root, c.eng.bin, c.envp, c.env });
     reviver.detach();
     try httpd.serveOn(try panelListener(c, s.panel_port), api.handle, panel);
 }
@@ -1379,7 +1379,7 @@ fn cmdRelay(c: *Ctx, args: []const [:0]const u8) !void {
     var src: RelaySource = .{ .root = c.store.root, .key = key, .env = c.env, .arena = &arena, .io = c.io };
     // The tunnel's watch shares this long-lived process: both keep the phone
     // reachable after the network or the device went away for a while.
-    if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, tunnel.watch, .{ c.store.root, c.eng.bin, c.envp })) |th| th.detach() else |_| {}
+    if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, tunnel.watch, .{ c.store.root, c.eng.bin, c.envp, c.env })) |th| th.detach() else |_| {}
     relay.loop(std.heap.smp_allocator, c.io, &src, relayConfig, relayHeal);
 }
 

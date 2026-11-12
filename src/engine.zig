@@ -51,6 +51,23 @@ pub fn locate(a: Allocator, env: *std.process.Environ.Map) ![:0]const u8 {
     return error.EngineNotFound;
 }
 
+/// Whether the engine's daemon runs, as under Termux. It brings back the
+/// containers whose supervisor was killed, so nothing else may start them
+/// at the same time. Its data directory is found the way `pdock` finds it.
+pub fn daemonRunning(a: Allocator, env: *std.process.Environ.Map) bool {
+    const root = env.get("POCKETDOCK_ROOT") orelse blk: {
+        const home = env.get("HOME") orelse return false;
+        if (home.len <= 1) return false;
+        break :blk std.fmt.allocPrint(a, "{s}/.pocketdock", .{home}) catch return false;
+    };
+    const path = std.fmt.allocPrintSentinel(a, "{s}/daemon.lock", .{root}, 0) catch return false;
+    const fd = sys.open(path.ptr, sys.O_CLOEXEC, 0) catch return false;
+    defer sys.close(fd);
+    const LOCK_EX = 2;
+    const LOCK_NB = 4;
+    return linux.errno(linux.flock(fd, LOCK_EX | LOCK_NB)) == .AGAIN;
+}
+
 pub const Engine = struct {
     a: Allocator,
     bin: [:0]const u8,

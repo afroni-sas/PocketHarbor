@@ -749,11 +749,15 @@ pub fn wake(store: Store, eng: *Engine, id: []const u8) void {
 /// Starts again, each on its own thread, the services whose containers
 /// stopped without being asked to: the device restarted, or an older
 /// install's systemd unit took them down with PocketHarbor. A sleeping
-/// service waits for its next request, and a task for its schedule.
-pub fn revive(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
+/// service waits for its next request, and a task for its schedule. Where
+/// the engine's daemon runs, it does this itself.
+pub fn revive(root: []const u8, bin: [:0]const u8, envp: engine.Envp, env: *std.process.Environ.Map) void {
+    // Started at boot beside PocketHarbor, the daemon may take a moment.
+    sys.sleepMs(5000);
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    if (engine.daemonRunning(a, env)) return;
     const store: Store = .{ .a = a, .root = root };
     var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
     for (store.list() catch return) |svc| {
