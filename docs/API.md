@@ -280,7 +280,7 @@ For services running PostgreSQL, MySQL, MariaDB, Redis or MongoDB:
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/templates` | | `[{id, name, category, description, image, port, connect}]`: PostgreSQL, MySQL, MariaDB, Redis, MongoDB, MinIO, NATS… |
+| GET | `/api/templates` | | `[{id, name, category, description, image, port, connect}]`: `postgres`, `mysql`, `mariadb`, `redis`, `mongo`, `bucket` (S3), `nats`. The image is the one this device can run: MongoDB falls back to 4.4 on processors without ARMv8.2 or AVX. |
 | POST | `/api/templates/:id` | `{project, environment, name?, x?, y?}` | Creates and deploys it, with its volume, a generated password and the variables others refer to (`connect` names the main one, e.g. `DATABASE_URL`) |
 
 ## Settings

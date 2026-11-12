@@ -162,7 +162,7 @@ const connectVariable = [
   [/mysql/, 'MYSQL_URL'],
   [/redis/, 'REDIS_URL'],
   [/mongo/, 'MONGO_URL'],
-  [/minio/, 'S3_ENDPOINT'],
+  [/minio|versitygw/, 'S3_ENDPOINT'],
   [/nats/, 'NATS_URL'],
 ]
 

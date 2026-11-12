@@ -1517,7 +1517,9 @@ fn templatesApi(c: *Ctx, seg: []const []const u8) !void {
     if (seg.len == 0 and method(c, "GET")) {
         const View = struct { id: []const u8, name: []const u8, category: []const u8, description: []const u8, image: []const u8, port: u16, connect: []const u8 };
         var out: std.ArrayList(View) = .empty;
-        for (templates.all) |tpl| try out.append(c.a, .{
+        for (templates.all) |each| {
+            const tpl = templates.forDevice(each);
+            try out.append(c.a, .{
             .id = tpl.id,
             .name = tpl.name,
             .category = tpl.category,
@@ -1525,7 +1527,8 @@ fn templatesApi(c: *Ctx, seg: []const []const u8) !void {
             .image = tpl.image,
             .port = tpl.port,
             .connect = tpl.connect,
-        });
+            });
+        }
         return c.res.json(200, out.items);
     }
     if (seg.len != 1 or !method(c, "POST")) return c.res.fail(404, "not found");
