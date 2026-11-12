@@ -203,6 +203,7 @@ pub fn main(init: std.process.Init) !void {
         .{ "_wake", cmdWake },
         .{ "_sleep", cmdSleep },
         .{ "_deploy", cmdDeployJob },
+        .{ "_connector", cmdConnector },
         .{ "_panel", cmdPanel },
         .{ "user", cmdUser },
         .{ "token", cmdToken },
@@ -1278,6 +1279,9 @@ fn cmdCloudflare(c: *Ctx, args: []const [:0]const u8) !void {
         const state = edge.connect(c.a, c.gpa, c.io, key, c.store, c.eng, token, account, &failure) catch |e|
             die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
         printEdge(state);
+        sys.print("Starting the tunnel (the first time, cloudflared is downloaded)...\n", .{});
+        edge.startConnector(c.a, c.gpa, c.io, key, c.store, c.eng, &failure) catch |e|
+            die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
         return;
     }
     if (eql(verb, "sync")) {
@@ -1301,6 +1305,15 @@ fn cmdCloudflare(c: *Ctx, args: []const [:0]const u8) !void {
         return;
     }
     die("usage: pharbor cloudflare connect|sync|status|disconnect", .{});
+}
+
+/// The dashboard's background start of cloudflared.
+fn cmdConnector(c: *Ctx, args: []const [:0]const u8) !void {
+    _ = args;
+    const key = crypto.loadKey(c.store.root) catch die("cannot read the master key", .{});
+    var failure: edge.Failure = .{ .err = error.None, .message = "" };
+    edge.startConnector(c.a, c.gpa, c.io, key, c.store, c.eng, &failure) catch |e|
+        die("{s}", .{if (failure.message.len > 0) failure.message else @errorName(e)});
 }
 
 fn printEdge(state: edge.State) void {

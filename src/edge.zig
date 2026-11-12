@@ -97,20 +97,59 @@ pub fn connect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store:
     const name = try std.fmt.allocPrint(a, "pocketharbor-{s}", .{id[0..8]});
     const found = try cf.findTunnel(a, account, name);
     const tun = found orelse try cf.createTunnel(a, account, name);
-    const run_token = try cf.tunnelToken(a, account, tun.id);
     {
         const lock = try store.lock();
         defer store.unlock(lock);
         var s = store.settings();
         s.cloudflare_token = try crypto.seal(a, key, token);
         s.cloudflare_account = account;
+        s.tunnel_id = tun.id;
         try store.saveSettings(s);
     }
-    tunnel.named(store, eng, run_token) catch {
-        cf.message = "the tunnel was created but cloudflared did not start; see pharbor tunnel status";
-        return error.TunnelFailed;
-    };
+    _ = eng;
     return sync(a, gpa, io, key, store, failure);
+}
+
+/// Starts cloudflared for this installation's tunnel. The first time, its
+/// image is downloaded: a minute or more on a phone, which is why the
+/// dashboard runs this in a process of its own. The marker file says it is
+/// under way.
+pub fn startConnector(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, eng: *engine.Engine, failure: *Failure) !void {
+    var cf = try client(a, gpa, io, key, store);
+    const s = store.settings();
+    const marker = store.path("tunnel-starting");
+    var pid_buf: [16]u8 = undefined;
+    sys.writeFileAtomic(marker, std.fmt.bufPrint(&pid_buf, "{d}", .{std.os.linux.getpid()}) catch "", 0o600) catch {};
+    defer {
+        var p = sys.Path.of(marker) catch null;
+        if (p) |*m| sys.unlink(m.z()) catch {};
+    }
+    const run_token = cf.tunnelToken(a, s.cloudflare_account, s.tunnel_id) catch |e| {
+        failure.message = cf.message;
+        noteError(store, cf.message);
+        return e;
+    };
+    tunnel.named(store, eng, run_token) catch |e| {
+        failure.message = "cloudflared did not start; see pharbor tunnel status";
+        noteError(store, failure.message);
+        return e;
+    };
+}
+
+/// Whether the connector is downloading or starting right now: the marker
+/// names the process doing it, which must still be alive.
+pub fn connectorStarting(store: Store) bool {
+    const text = sys.readFileAlloc(store.a, store.path("tunnel-starting"), 64) catch return false;
+    const pid = std.fmt.parseInt(i32, std.mem.trim(u8, text, " \n"), 10) catch return false;
+    var buf: [32]u8 = undefined;
+    const proc = std.fmt.bufPrintSentinel(&buf, "/proc/{d}", .{pid}, 0) catch return false;
+    return sys.exists(proc.ptr);
+}
+
+fn noteError(store: Store, message: []const u8) void {
+    var state = load(store);
+    state.@"error" = message;
+    save(store, state);
 }
 
 /// Points every public name at the tunnel: its routes first, then a DNS

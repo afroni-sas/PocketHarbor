@@ -488,7 +488,19 @@ function CustomForm({ svc, update }) {
 function GenerateForm({ svc, update, info, quickTunnel }) {
   const v = draft.value
   const zones = info.zones || []
-  if (!info.managed || zones.length === 0) {
+  if (info.managed && zones.length === 0) {
+    return (
+      <div class="net-form">
+        <b>Generate Service Domain</b>
+        <Foot hint="Your Cloudflare account has no zone yet: add a domain to it, then press Sync now in Settings › Public access." error>
+          <button type="button" class="btn sm" onClick={() => (form.value = '')}>
+            Close
+          </button>
+        </Foot>
+      </div>
+    )
+  }
+  if (!info.managed) {
     return (
       <form
         class="net-form"
