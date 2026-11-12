@@ -1327,11 +1327,34 @@ const RelaySource = struct {
     key: crypto.Key,
     env: *std.process.Environ.Map,
     arena: *std.heap.ArenaAllocator,
+    io: std.Io,
+    /// When the relay was last asked to heal, in seconds.
+    healed_at: i64 = 0,
 };
+
+/// The relay's name stopped resolving: the account's workers.dev subdomain
+/// was probably renamed. Asks Cloudflare, at most every ten minutes; the
+/// next attempt then reads the new address from the settings.
+fn relayHeal(src: *RelaySource) void {
+    const now: i64 = @intCast(@divFloor(sys.nowNs(), std.time.ns_per_s));
+    if (now - src.healed_at < 600) return;
+    src.healed_at = now;
+    if (src.env.get("PHARBOR_RELAY_URL") != null) return;
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    const store: store_mod.Store = .{ .a = arena.allocator(), .root = src.root };
+    if (!edge.connected(store)) return;
+    var failure: edge.Failure = .{ .err = error.None, .message = "" };
+    edge.ensureRelay(arena.allocator(), std.heap.smp_allocator, src.io, src.key, store, &failure) catch {
+        sys.eprint("relay: Cloudflare could not say where the relay is: {s}\n", .{failure.message});
+        return;
+    };
+    sys.print("relay: asked Cloudflare where the relay is now\n", .{});
+}
 
 /// Where the relay's client connects, read again before each attempt.
 /// PHARBOR_RELAY_URL and PHARBOR_RELAY_SECRET replace the settings, for tests.
-fn relayConfig(src: *const RelaySource) ?relay.Config {
+fn relayConfig(src: *RelaySource) ?relay.Config {
     _ = src.arena.reset(.retain_capacity);
     const a = src.arena.allocator();
     const store: store_mod.Store = .{ .a = a, .root = src.root };
@@ -1348,8 +1371,8 @@ fn cmdRelay(c: *Ctx, args: []const [:0]const u8) !void {
     _ = args;
     const key = crypto.loadKey(c.store.root) catch die("cannot read the master key", .{});
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    const src: RelaySource = .{ .root = c.store.root, .key = key, .env = c.env, .arena = &arena };
-    relay.loop(std.heap.smp_allocator, c.io, &src, relayConfig);
+    var src: RelaySource = .{ .root = c.store.root, .key = key, .env = c.env, .arena = &arena, .io = c.io };
+    relay.loop(std.heap.smp_allocator, c.io, &src, relayConfig, relayHeal);
 }
 
 /// The dashboard's background start of cloudflared.

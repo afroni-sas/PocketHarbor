@@ -245,6 +245,18 @@ pub const Client = struct {
         return got.subdomain;
     }
 
+    /// The names of the account's Workers.
+    pub fn workerNames(self: *Client, a: Allocator, account: []const u8) ![]const []const u8 {
+        const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/scripts", .{account});
+        const list = try self.call(a, []const struct { id: []const u8 = "" }, .GET, path, null);
+        const out = try a.alloc([]const u8, list.len);
+        for (list, 0..) |w, i| out[i] = w.id;
+        return out;
+    }
+
+    /// Only for an account that has no workers.dev subdomain yet: on one
+    /// that has, this would rename it, and every workers.dev address of the
+    /// account with it.
     pub fn createWorkersSubdomain(self: *Client, a: Allocator, account: []const u8, name: []const u8) ![]const u8 {
         const path = try std.fmt.allocPrint(a, "/accounts/{s}/workers/subdomain", .{account});
         const body = try std.json.Stringify.valueAlloc(a, .{ .subdomain = name }, .{});
@@ -278,6 +290,14 @@ pub const Client = struct {
         _ = try self.call(a, std.json.Value, .DELETE, path, null);
     }
 };
+
+/// Whether Cloudflare's message says the account has no workers.dev
+/// subdomain, as opposed to any other failure to read it.
+pub fn noSubdomain(message: []const u8) bool {
+    return std.ascii.findIgnoreCase(message, "not found") != null or
+        std.ascii.findIgnoreCase(message, "not_found") != null or
+        std.ascii.findIgnoreCase(message, "does not have") != null;
+}
 
 /// Tokens an account owns start with cfat_; a user's with cfut_, or nothing
 /// for the older ones.
