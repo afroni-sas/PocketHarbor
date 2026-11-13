@@ -296,7 +296,7 @@ For services running PostgreSQL, MySQL, MariaDB, Redis or MongoDB:
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/cloudflare` | | `{connected, account, tunnel_id, origin, permissions, create_url, connector, saas_zone, generated_zone, relay: {ready, dashboard, error}, state}`. `create_url` is Cloudflare's token form with the permissions filled in; `state` holds the zones, every public name's outcome and the last sync's error. |
+| GET | `/api/cloudflare` | | `{connected, account, tunnel_id, origin, permissions, create_url, connector, saas_zone, generated_zone, relay: {ready, dashboard, error}, state}`. `create_url` is Cloudflare's token form with the permissions filled in; `state` holds the zones, every public name's outcome and the last error: a sync's, or cloudflared's failure to start, which goes once it runs. |
 | PUT | `/api/cloudflare` | `{token, account?}` | Connects: verifies the token, creates the tunnel, deploys the relay, writes the records, starts cloudflared. `account` is needed only for a token an account owns (`cfat_`). |
 | PATCH | `/api/cloudflare` | `{generated_zone?, saas_zone?}` | Where generated names go (`""` is workers.dev), and the zone that serves domains kept elsewhere |
 | POST | `/api/cloudflare/sync` | `{}` | Puts tunnel routes, DNS records, Workers and webhooks in step now |
