@@ -17,6 +17,7 @@ export const WS_OPEN = 8 // relay to phone: a visitor asks for a WebSocket; JSON
 export const WS_TEXT = 9 // both ways: a text message of an open WebSocket
 export const WS_BINARY = 10 // both ways: a binary message
 export const WS_CLOSE = 11 // both ways: two bytes of code, then the reason
+export const CANCEL = 12 // relay to phone: the visitor went away; the response stops
 
 const CHUNK = 256 * 1024
 const TIMEOUT_MS = 100_000
@@ -70,6 +71,10 @@ export class RelayCore {
       length: body ? body.length : 0,
       ip: request.headers.get('cf-connecting-ip') || '',
     }
+    // The visitor went away (the request's signal, with the
+    // enable_request_signal flag): the phone stops the response instead of
+    // streaming on for no one, as an SSE stream or a long download would.
+    if (request.signal) request.signal.addEventListener('abort', () => this.cancel(id))
     const response = new Promise((resolve) => {
       const timer = setTimeout(() => this.finish(id, new Response('The phone did not answer in time.', { status: 504 })), TIMEOUT_MS)
       this.pending.set(id, { resolve, writer: null, timer, head: request.method === 'HEAD', upgrade, request })
@@ -97,6 +102,18 @@ export class RelayCore {
       const id = one[0]
       if (id !== 0 && !this.pending.has(id) && !(this.visitor && this.visitor(id))) return id
     }
+  }
+
+  /** Tells the phone that nobody reads a response any more, and forgets it. */
+  cancel(id) {
+    const p = this.pending.get(id)
+    if (!p) return
+    clearTimeout(p.timer)
+    this.pending.delete(id)
+    try {
+      const ws = this.socket()
+      if (ws) ws.send(frame(CANCEL, id))
+    } catch {}
   }
 
   /** Resolves a request that has no response yet, and forgets it. */
@@ -141,7 +158,7 @@ export class RelayCore {
       const encoded = head.headers.some(([name, value]) => name.toLowerCase() === 'content-encoding' && value && value.toLowerCase() !== 'identity')
       p.resolve(new Response(stream.readable, { status: head.status, headers: head.headers, ...(encoded ? { encodeBody: 'manual' } : {}) }))
     } else if (f.type === RES_BODY && p.writer) {
-      p.writer.write(f.data.slice()).catch(() => {})
+      p.writer.write(f.data.slice()).catch(() => this.cancel(f.id))
     } else if (f.type === RES_END) {
       if (p.writer) p.writer.close().catch(() => {})
       this.pending.delete(f.id)
