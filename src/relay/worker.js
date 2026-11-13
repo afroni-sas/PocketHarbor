@@ -135,7 +135,11 @@ export class RelayCore {
       const stream = new TransformStream()
       p.writer = stream.writable.getWriter()
       clearTimeout(p.timer)
-      p.resolve(new Response(stream.readable, { status: head.status, headers: head.headers }))
+      // A body the service compressed is passed on as it is, with its
+      // Content-Encoding. Otherwise the runtime takes it for plain bytes:
+      // it drops the header, or compresses it a second time.
+      const encoded = head.headers.some(([name, value]) => name.toLowerCase() === 'content-encoding' && value && value.toLowerCase() !== 'identity')
+      p.resolve(new Response(stream.readable, { status: head.status, headers: head.headers, ...(encoded ? { encodeBody: 'manual' } : {}) }))
     } else if (f.type === RES_BODY && p.writer) {
       p.writer.write(f.data.slice()).catch(() => {})
     } else if (f.type === RES_END) {
