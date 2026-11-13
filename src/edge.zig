@@ -429,10 +429,23 @@ pub fn startConnector(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key,
         return e;
     };
     tunnel.named(store, eng, run_token) catch |e| {
-        failure.message = "cloudflared did not start; see pharbor tunnel status";
+        failure.message = connector_failed;
         noteError(store, failure.message);
         return e;
     };
+}
+
+pub const connector_failed = "cloudflared did not start; see pharbor tunnel status";
+
+/// The state to show while cloudflared runs: a failure to start it is
+/// over, even when it came back by itself rather than through a sync.
+pub fn shown(store: Store, running: bool) State {
+    var state = load(store);
+    if (running and std.mem.eql(u8, state.@"error", connector_failed)) {
+        state.@"error" = "";
+        save(store, state);
+    }
+    return state;
 }
 
 /// Whether the connector is downloading or starting right now: the marker
@@ -655,6 +668,30 @@ pub fn disconnect(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, sto
     store.syncRoutes();
     var path = sys.Path.of(store.path("cloudflare.json")) catch return;
     sys.unlink(path.z()) catch {};
+}
+
+test "a failure to start cloudflared is forgotten once it runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.fmt.allocPrint(a, "/tmp/pharbor-edge-test-{d}", .{std.os.linux.getpid()});
+    try sys.mkdirP(root, 0o700);
+    const store: Store = .{ .a = a, .root = root };
+    defer {
+        var file = sys.Path.of(store.path("cloudflare.json")) catch unreachable;
+        sys.unlink(file.z()) catch {};
+        var dir = sys.Path.of(root) catch unreachable;
+        sys.rmdir(dir.z()) catch {};
+    }
+
+    noteError(store, connector_failed);
+    try std.testing.expectEqualStrings(connector_failed, shown(store, false).@"error");
+    try std.testing.expectEqualStrings("", shown(store, true).@"error");
+    try std.testing.expectEqualStrings("", load(store).@"error");
+
+    // Cloudflare's own refusals stay until a sync succeeds.
+    noteError(store, "Authentication error");
+    try std.testing.expectEqualStrings("Authentication error", shown(store, true).@"error");
 }
 
 test "the hub is never one of the services' Workers" {

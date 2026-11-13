@@ -95,10 +95,14 @@ pub fn named(store: Store, eng: *Engine, token: []const u8) !void {
     if (try eng.run(&args) != 0) return error.TunnelFailed;
 
     var waited: u32 = 0;
+    // Stopped for five seconds in a row, it failed. A shorter stop is a
+    // restart: its policy's, or the one that follows the device waking up.
+    var stopped: u32 = 0;
     while (waited < 60) : (waited += 1) {
         if (std.mem.indexOf(u8, eng.logs(container), "Registered tunnel connection") != null) break;
         const info = eng.inspect(container) orelse return error.TunnelFailed;
-        if (!info.alive()) {
+        stopped = if (info.alive()) 0 else stopped + 1;
+        if (stopped >= 10) {
             sys.eprint("error: the tunnel stopped\n{s}", .{eng.logs(container)});
             return error.TunnelFailed;
         }

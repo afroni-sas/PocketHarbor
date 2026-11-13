@@ -660,7 +660,8 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
     const create_url = cloudflare.token_url;
     if (seg.len == 0 and method(c, "GET")) {
         const s = c.store.settings();
-        const state = edge.load(c.store);
+        const connector = if (edge.connected(c.store)) connectorState(c) else "";
+        const state = edge.shown(c.store, eql(connector, "running"));
         return c.res.json(200, .{
             .connected = edge.connected(c.store),
             .account = s.cloudflare_account,
@@ -668,7 +669,7 @@ fn cloudflareApi(c: *Ctx, seg: []const []const u8) !void {
             .origin = try tunnel_mod.originUrl(c.store),
             .permissions = cloudflare.token_permissions,
             .create_url = create_url,
-            .connector = if (edge.connected(c.store)) connectorState(c) else "",
+            .connector = connector,
             .saas_zone = s.cloudflare_saas_zone,
             .generated_zone = s.generated_zone,
             .relay = .{
