@@ -296,15 +296,17 @@ pub fn run(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, opts
     if (source) |s| log.say("{s} of deployment {d}", .{ if (opts.restore_env) "Rollback to the image and variables" else "Redeploy of the image", s.number });
 
     ship(store, eng, vars, id, &svc, &record, log, opts) catch |e| {
-        log.say("Deployment failed: {s}", .{explain(e)});
+        // ship gives a fuller reason when it has one, such as an exit code.
+        const reason = if (record.reason.len > 0) record.reason else explain(e);
+        log.say("Deployment failed: {s}", .{reason});
         record.status = "failed";
-        record.reason = explain(e);
+        record.reason = reason;
         record.finished_at = nowS();
         store.saveDeployment(id, record) catch {};
         alerts.notify(a, store, vars.key, opts.io, .{
             .kind = "deploy_failed",
             .title = std.fmt.allocPrint(a, "{s} failed to deploy", .{svc.name}) catch "A deploy failed",
-            .detail = std.fmt.allocPrint(a, "Deployment #{d}: {s}. The previous version keeps running.", .{ number, explain(e) }) catch "",
+            .detail = std.fmt.allocPrint(a, "Deployment #{d}: {s}. The previous version keeps running.", .{ number, reason }) catch "",
             .project = svc.project,
             .environment = svc.environment,
             .service = svc.name,
@@ -433,10 +435,14 @@ fn ship(store: Store, eng: *Engine, vars: vars_mod.Vars, id: []const u8, svc: *S
         // A task, like migrations: it ran and finished well. As on
         // Railway, that is a completed deployment, not a failed one.
         if (e == error.ContainerExited and finishedWell(eng, container)) return complete(store, eng, id, svc, record, log, container);
+        if (e == error.ContainerExited) noteExit(store.a, eng, container, record);
         return e;
     };
     log.say("Listening on port {d}, checking health", .{ports.container});
-    try waitHealthy(eng, container, ports.host, svc.health_path, deadline);
+    waitHealthy(eng, container, ports.host, svc.health_path, deadline) catch |e| {
+        if (e == error.ContainerExited) noteExit(store.a, eng, container, record);
+        return e;
+    };
 
     var old: []const u8 = "";
     {
@@ -711,6 +717,57 @@ fn retirePrevious(store: Store, id: []const u8, number: u32) void {
         old.status = "removed";
         store.saveDeployment(id, old) catch {};
     }
+}
+
+/// Records why the container stopped, while it still exists to say so.
+fn noteExit(a: Allocator, eng: *Engine, container: []const u8, record: *Deployment) void {
+    const code = if (eng.inspect(container)) |info| info.exit_code else 0;
+    record.reason = exitReason(a, code, eng.logs(container));
+}
+
+/// Why a container stopped by itself: its exit code, and the last line it
+/// wrote, which is usually the error. Terminal colours are left out.
+fn exitReason(a: Allocator, code: i32, output: []const u8) []const u8 {
+    var lines = std.mem.splitBackwardsScalar(u8, output, '\n');
+    const last = while (lines.next()) |l| {
+        const plain = withoutColours(a, l) catch break "";
+        const t = std.mem.trim(u8, plain, " \r\t");
+        if (t.len > 0) break t;
+    } else "";
+    if (last.len == 0) return std.fmt.allocPrint(a, "the container exited with code {d}", .{code}) catch "the container exited";
+    const max = 240;
+    const said = if (last.len > max) last[0..max] else last;
+    return std.fmt.allocPrint(a, "the container exited with code {d}: {s}{s}", .{ code, said, if (last.len > max) "…" else "" }) catch "the container exited";
+}
+
+/// The text without its ANSI escape sequences, such as colours.
+fn withoutColours(a: Allocator, s: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, 0x1b) == null) return s;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == 0x1b and i + 1 < s.len and s[i + 1] == '[') {
+            i += 2;
+            while (i < s.len and !std.ascii.isAlphabetic(s[i])) i += 1;
+            i += 1;
+            continue;
+        }
+        try out.append(a, s[i]);
+        i += 1;
+    }
+    return out.items;
+}
+
+test "a container's exit says its code and its last line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings(
+        "the container exited with code 127: pdock: cannot run /afroni: it is built for x86_64 (amd64), and this device is arm64 (aarch64)",
+        exitReason(a, 127, "pdock: cannot run /afroni: it is built for x86_64 (amd64), and this device is arm64 (aarch64)\n"),
+    );
+    try std.testing.expectEqualStrings("the container exited with code 1: error: boom", exitReason(a, 1, "starting\n\x1b[31merror\x1b[0m: boom\n\n"));
+    try std.testing.expectEqualStrings("the container exited with code 3", exitReason(a, 3, " \n"));
 }
 
 fn lastLines(text: []const u8, n: usize) []const u8 {
