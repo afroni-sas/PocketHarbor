@@ -13,7 +13,8 @@ const Allocator = std.mem.Allocator;
 /// What PocketHarbor uploads to Cloudflare.
 pub const worker_js = @embedFile("relay/worker.js");
 
-pub const Kind = enum(u8) { head = 1, body = 2, end = 3, res_head = 4, res_body = 5, res_end = 6, abort = 7, ws_open = 8, ws_text = 9, ws_binary = 10, ws_close = 11, _ };
+/// cancel: relay to phone, the visitor went away, so the response stops.
+pub const Kind = enum(u8) { head = 1, body = 2, end = 3, res_head = 4, res_body = 5, res_end = 6, abort = 7, ws_open = 8, ws_text = 9, ws_binary = 10, ws_close = 11, cancel = 12, _ };
 
 /// The largest piece of body in one frame; Cloudflare caps a WebSocket
 /// message at 1 MiB.
@@ -205,6 +206,29 @@ const Session = struct {
     /// Visitors' WebSockets, by request id, bridged to their services.
     bridges: std.AutoHashMapUnmanaged(u32, *Bridge) = .empty,
     bridges_lock: std.Io.Mutex = .init,
+    /// Responses being streamed, by request id: their sockets to the proxy.
+    streams: std.AutoHashMapUnmanaged(u32, i32) = .empty,
+    streams_lock: std.Io.Mutex = .init,
+
+    fn track(s: *Session, id: u32, fd: i32) void {
+        s.streams_lock.lockUncancelable(s.io);
+        defer s.streams_lock.unlock(s.io);
+        s.streams.put(s.gpa, id, fd) catch {};
+    }
+
+    fn untrack(s: *Session, id: u32) void {
+        s.streams_lock.lockUncancelable(s.io);
+        defer s.streams_lock.unlock(s.io);
+        _ = s.streams.remove(id);
+    }
+
+    /// The visitor went away: ends the response's read from under it, so
+    /// that a stream (SSE, a long download) stops instead of running on.
+    fn cancel(s: *Session, id: u32) void {
+        s.streams_lock.lockUncancelable(s.io);
+        defer s.streams_lock.unlock(s.io);
+        if (s.streams.get(id)) |fd| _ = linux.shutdown(fd, linux.SHUT.RDWR);
+    }
 
     fn heard(s: *Session) void {
         s.last_rx_ms.store(@intCast(@divFloor(sys.monoNs(), std.time.ns_per_ms)), .release);
@@ -226,6 +250,7 @@ const Session = struct {
         s.client.connection_pool.release(s.conn, s.io);
         s.client.deinit();
         s.bridges.deinit(s.gpa);
+        s.streams.deinit(s.gpa);
         s.gpa.destroy(s);
     }
 
@@ -444,6 +469,8 @@ fn run(job: *Job, a: Allocator, scratch: []u8) !void {
     const host = job.head.host orelse return error.NoHost;
     const fd = try connectProxy(s.proxy_port);
     defer sys.close(fd);
+    s.track(job.id, fd);
+    defer s.untrack(job.id);
     try sys.writeAll(fd, try requestHead(a, job.head, host, job.body.len));
     if (job.body.len > 0) try sys.writeAll(fd, job.body);
 
@@ -459,6 +486,11 @@ fn run(job: *Job, a: Allocator, scratch: []u8) !void {
     };
     const head = try parseResponseHead(a, buf[0..end]);
     try s.sendFrame(scratch, .res_head, job.id, try std.json.Stringify.valueAlloc(a, .{ .status = head.status, .headers = head.headers }, .{}));
+    // The service answered: a body may now be quiet for as long as it likes,
+    // as server-sent events are between messages. A visitor that leaves is
+    // told by the relay, which cancels the read.
+    const forever = linux.timeval{ .sec = 0, .usec = 0 };
+    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVTIMEO, @ptrCast(&forever), @sizeOf(linux.timeval));
 
     var out: BodyOut = .{ .session = s, .id = job.id, .scratch = scratch };
     var dechunk: Dechunker = .{};
@@ -804,6 +836,7 @@ fn serve(s: *Session) !void {
                 thread.detach();
             },
             .ws_text, .ws_binary, .ws_close => toBridge(s, f.id, f.kind, f.data),
+            .cancel => s.cancel(f.id),
             .end => if (building.fetchRemove(f.id)) |kv| {
                 const b = kv.value;
                 defer gpa.destroy(b);

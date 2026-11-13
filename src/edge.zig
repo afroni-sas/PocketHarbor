@@ -69,6 +69,8 @@ fn serviceScripts(a: Allocator, hub: []const u8, hosts: []const []const u8) ![]c
 }
 
 const compatibility_date = "2025-06-01";
+/// request.signal tells the relay that a visitor went away.
+const compatibility_flags = [_][]const u8{"enable_request_signal"};
 
 fn hubMetadata(a: Allocator, secret: []const u8, migrate: bool) ![]const u8 {
     const Binding = struct { type: []const u8, name: []const u8, class_name: ?[]const u8 = null, text: ?[]const u8 = null };
@@ -81,17 +83,24 @@ fn hubMetadata(a: Allocator, secret: []const u8, migrate: bool) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, .{
             .main_module = "relay.js",
             .compatibility_date = compatibility_date,
+            .compatibility_flags = compatibility_flags,
             .bindings = bindings,
             .migrations = .{ .new_tag = "v1", .new_sqlite_classes = [_][]const u8{"Relay"} },
         }, .{ .emit_null_optional_fields = false });
     }
-    return std.json.Stringify.valueAlloc(a, .{ .main_module = "relay.js", .compatibility_date = compatibility_date, .bindings = bindings }, .{ .emit_null_optional_fields = false });
+    return std.json.Stringify.valueAlloc(a, .{
+        .main_module = "relay.js",
+        .compatibility_date = compatibility_date,
+        .compatibility_flags = compatibility_flags,
+        .bindings = bindings,
+    }, .{ .emit_null_optional_fields = false });
 }
 
 fn serviceMetadata(a: Allocator, hub: []const u8) ![]const u8 {
     return std.json.Stringify.valueAlloc(a, .{
         .main_module = "relay.js",
         .compatibility_date = compatibility_date,
+        .compatibility_flags = compatibility_flags,
         .bindings = .{
             .{ .type = "durable_object_namespace", .name = "RELAY", .class_name = "Relay", .script_name = hub },
             .{ .type = "plain_text", .name = "ROLE", .text = "service" },
