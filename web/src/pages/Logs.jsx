@@ -8,6 +8,7 @@ import { me, toast } from '../state.js'
 import { page, setQuery } from '../project.js'
 import { attempt, GithubIcon, openMenu, ServiceIcon, Spinner, timeAgo } from '../ui.jsx'
 import { LevelText, levelOf } from '../loglevel.jsx'
+import { AnsiText, parseAnsi, plainOf } from '../ansi.jsx'
 
 const data = signal({ key: '', text: null, rows: null })
 const record = signal({ key: '', deployment: null, variables: null })
@@ -145,9 +146,12 @@ function lastState(line) {
 }
 
 function TextLogs({ text, q, tab }) {
-  const lines = text.split('\n').map(lastState)
-  if (lines[lines.length - 1] === '') lines.pop()
-  const shown = q ? lines.filter((l) => l.toLowerCase().includes(q)) : lines
+  const lines = text.split('\n').map(lastState).map((raw) => {
+    const runs = parseAnsi(raw)
+    return { runs, plain: plainOf(raw, runs) }
+  })
+  if (lines.length && lines[lines.length - 1].plain === '') lines.pop()
+  const shown = q ? lines.filter((l) => l.plain.toLowerCase().includes(q)) : lines
   if (lines.length === 0) {
     return tab === 'deploy' ? <Waiting title="No output yet" text="What the app prints appears here as it runs." /> : <Waiting title="No build log" text="This deployment wrote nothing yet." />
   }
@@ -156,10 +160,12 @@ function TextLogs({ text, q, tab }) {
       <pre class="logs" ref={(e) => (el = e)} onScroll={onScroll}>
         {shown.length === 0 && <span class="muted">No line matches.</span>}
         {shown.map((l, i) => {
-          const info = levelOf(l)
+          const info = levelOf(l.plain)
+          const mark = (t, k) => <Highlight key={k} text={t} q={q} />
           return (
             <div key={i} class={`line${info.level === 'error' ? ' err' : ''}`}>
-              <LevelText text={l} info={info} mark={(t, k) => <Highlight key={k} text={t} q={q} />} />
+              {/* A line the app coloured keeps its own colours. */}
+              {l.runs ? <AnsiText runs={l.runs} mark={mark} /> : <LevelText text={l.plain} info={info} mark={mark} />}
             </div>
           )
         })}

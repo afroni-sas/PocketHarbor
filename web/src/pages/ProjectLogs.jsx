@@ -10,6 +10,7 @@ import { openService, page } from '../project.js'
 import { openMenu, Spinner } from '../ui.jsx'
 import { RangePicker } from './Chart.jsx'
 import { LevelText, levelOf } from '../loglevel.jsx'
+import { AnsiText, parseAnsi, plainOf } from '../ansi.jsx'
 
 const query = signal('')
 /** What the server was asked: the search box, after a pause in typing. */
@@ -198,7 +199,10 @@ export function ProjectLogs() {
             {cut && <div class="range-start">You reached the start of the range · {stamp(from)}</div>}
             {lines.length === 0 && <div class="empty small">{q ? `No line matches “${q}” in this range.` : 'Nothing logged in this range.'}</div>}
             {lines.map((l, i) => {
-              const info = levelOf(l.text)
+              const runs = parseAnsi(l.text)
+              const plain = plainOf(l.text, runs)
+              const info = levelOf(plain)
+              const mark = (t, k) => <Highlight key={k} text={t} q={q} />
               return (
                 <div key={i} class={`log-line${info.level === 'error' ? ' err' : ''}`}>
                   <span class="sev" />
@@ -206,9 +210,7 @@ export function ProjectLogs() {
                   <button class="svc-name" onClick={() => openService(l.service, { tab: undefined })} title={`Open ${l.service}`}>
                     {l.service}
                   </button>
-                  <span class="text">
-                    <LevelText text={l.text} info={info} mark={(t, k) => <Highlight key={k} text={t} q={q} />} />
-                  </span>
+                  <span class="text">{runs ? <AnsiText runs={runs} mark={mark} /> : <LevelText text={plain} info={info} mark={mark} />}</span>
                 </div>
               )
             })}
