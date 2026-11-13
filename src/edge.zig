@@ -112,6 +112,15 @@ pub fn moveHost(a: Allocator, host: []const u8, old: []const u8, new: []const u8
 /// now (the names move with it when it was renamed), the hub and each
 /// service's Worker present and in this version. Two reads when nothing
 /// changed; it runs on every sync.
+/// Whether the account's relay Workers run an older relay than this
+/// program's, as after an update.
+pub fn relayOutdated(store: Store) bool {
+    const s = store.settings();
+    if (!connected(store) or s.relay_hub.len == 0) return false;
+    const version = relayVersion();
+    return !std.mem.eql(u8, s.relay_version, &version);
+}
+
 pub fn ensureRelay(a: Allocator, gpa: Allocator, io: std.Io, key: crypto.Key, store: Store, failure: *Failure) !void {
     var cf = try client(a, gpa, io, key, store);
     errdefer failure.message = cf.message;

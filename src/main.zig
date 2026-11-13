@@ -1380,7 +1380,28 @@ fn cmdRelay(c: *Ctx, args: []const [:0]const u8) !void {
     // The tunnel's watch shares this long-lived process: both keep the phone
     // reachable after the network or the device went away for a while.
     if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, tunnel.watch, .{ c.store.root, c.eng.bin, c.envp, c.env })) |th| th.detach() else |_| {}
+    if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, relayUpgrade, .{ c.store.root, key, c.io })) |th| th.detach() else |_| {}
     relay.loop(std.heap.smp_allocator, c.io, &src, relayConfig, relayHeal);
+}
+
+/// After an update, the account's Workers still run the previous relay:
+/// deploys this one, once Cloudflare can be reached. DNS is not touched.
+fn relayUpgrade(root: []const u8, key: crypto.Key, io: std.Io) void {
+    var tries: u32 = 0;
+    while (tries < 30) : (tries += 1) {
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        const store: store_mod.Store = .{ .a = arena.allocator(), .root = root };
+        if (!edge.relayOutdated(store)) return;
+        var failure: edge.Failure = .{ .err = error.None, .message = "" };
+        if (edge.ensureRelay(arena.allocator(), std.heap.smp_allocator, io, key, store, &failure)) {
+            sys.print("relay: the Workers now run this version's relay\n", .{});
+            return;
+        } else |_| {
+            sys.eprint("relay: could not update the Workers yet: {s}\n", .{failure.message});
+        }
+        sys.sleepMs(60 * 1000);
+    }
 }
 
 /// The dashboard's background start of cloudflared.
