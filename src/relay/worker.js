@@ -40,6 +40,42 @@ export function parse(data) {
 
 const noBody = new Set([101, 204, 205, 304])
 
+// Compression. The service may compress what it sends, which keeps the
+// phone's uplink light. But a compressed body that crosses from the Durable
+// Object to the Worker the visitor reached loses what says it is
+// compressed, and Cloudflare compresses it a second time. So the relay
+// asks the service only for what it can undo (gzip, deflate), undoes it,
+// and lets Cloudflare compress for the visitor as it does for any Worker.
+const UNDOABLE = new Set(['gzip', 'x-gzip', 'deflate'])
+
+/** The visitor's Accept-Encoding, kept to what the relay can undo; "" if none. */
+export function decodable(value) {
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => UNDOABLE.has(part.split(';')[0].trim().toLowerCase()))
+    .join(', ')
+}
+
+const encodingOf = (head) => ((head.headers.find(([name]) => name.toLowerCase() === 'content-encoding') || [])[1] || '').trim().toLowerCase()
+
+/** The service's headers, without the encoding the relay undoes. */
+function plainHeaders(head) {
+  if (!UNDOABLE.has(encodingOf(head))) return head.headers
+  return head.headers.filter(([name]) => !['content-encoding', 'content-length'].includes(name.toLowerCase()))
+}
+
+/** The service's response, its body uncompressed when it was gzip or deflate. */
+export function plainResponse(body, head) {
+  const encoding = encodingOf(head)
+  if (!UNDOABLE.has(encoding)) {
+    // Something the relay did not ask for: passed on as it is.
+    const manual = encoding !== '' && encoding !== 'identity'
+    return new Response(body, { status: head.status, headers: head.headers, ...(manual ? { encodeBody: 'manual' } : {}) })
+  }
+  return new Response(body.pipeThrough(new DecompressionStream(encoding === 'x-gzip' ? 'gzip' : encoding)), { status: head.status, headers: plainHeaders(head) })
+}
+
 /** The relay's state for one phone: its socket and the requests in flight.
  * `accept(id, protocol, request)` answers a visitor's upgrade that the phone
  * agreed to, keeping the visitor's socket, and `visitor(id)` finds it
@@ -62,7 +98,10 @@ export class RelayCore {
     const url = new URL(request.url)
     const body = request.body ? new Uint8Array(await request.arrayBuffer()) : null
     const headers = []
-    for (const [name, value] of request.headers) headers.push([name, value])
+    for (const [name, value] of request.headers) {
+      if (name.toLowerCase() !== 'accept-encoding') headers.push([name, value])
+      else if (decodable(value)) headers.push([name, decodable(value)])
+    }
     const head = {
       method: request.method,
       path: url.pathname + url.search,
@@ -145,18 +184,14 @@ export class RelayCore {
       }
       if (noBody.has(head.status) || p.head) {
         clearTimeout(p.timer)
-        p.resolve(new Response(null, { status: head.status, headers: head.headers }))
+        p.resolve(new Response(null, { status: head.status, headers: plainHeaders(head) }))
         p.writer = { write: () => Promise.resolve(), close: () => Promise.resolve(), abort: () => Promise.resolve() }
         return
       }
       const stream = new TransformStream()
       p.writer = stream.writable.getWriter()
       clearTimeout(p.timer)
-      // A body the service compressed is passed on as it is, with its
-      // Content-Encoding. Otherwise the runtime takes it for plain bytes:
-      // it drops the header, or compresses it a second time.
-      const encoded = head.headers.some(([name, value]) => name.toLowerCase() === 'content-encoding' && value && value.toLowerCase() !== 'identity')
-      p.resolve(new Response(stream.readable, { status: head.status, headers: head.headers, ...(encoded ? { encodeBody: 'manual' } : {}) }))
+      p.resolve(plainResponse(stream.readable, head))
     } else if (f.type === RES_BODY && p.writer) {
       p.writer.write(f.data.slice()).catch(() => this.cancel(f.id))
     } else if (f.type === RES_END) {
