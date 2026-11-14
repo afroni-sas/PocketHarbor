@@ -806,11 +806,26 @@ pub fn wake(store: Store, eng: *Engine, id: []const u8) void {
     defer store.syncRoutes();
     const svc = store.load(id) catch return;
     if (svc.container.len == 0) return;
-    const info = eng.inspect(svc.container) orelse return;
-    if (!info.alive() and !eng.start(svc.container)) return;
+    const info = eng.inspect(svc.container) orelse {
+        sys.print("{s}: the engine does not know {s}\n", .{ id, svc.container });
+        return;
+    };
+    if (!info.alive()) {
+        sys.print("{s}: starting {s}\n", .{ id, svc.container });
+        if (!eng.start(svc.container)) {
+            sys.print("{s}: the engine could not start {s}\n", .{ id, svc.container });
+            return;
+        }
+    }
     const deadline = sys.monoNs() + 90 * std.time.ns_per_s;
-    const ports = waitForPort(eng, svc.container, svc.port, deadline) catch return;
-    waitHealthy(eng, svc.container, ports.host, svc.health_path, deadline) catch return;
+    const ports = waitForPort(eng, svc.container, svc.port, deadline) catch |e| {
+        sys.print("{s}: not up: {s}\n", .{ id, explain(e) });
+        return;
+    };
+    waitHealthy(eng, svc.container, ports.host, svc.health_path, deadline) catch |e| {
+        sys.print("{s}: not up: {s}\n", .{ id, explain(e) });
+        return;
+    };
 
     const lock = store.lock() catch return;
     defer store.unlock(lock);
@@ -824,15 +839,22 @@ pub fn wake(store: Store, eng: *Engine, id: []const u8) void {
 /// Starts again, each on its own thread, the services whose containers
 /// stopped without being asked to: the device restarted, or an older
 /// install's systemd unit took them down with PocketHarbor. A sleeping
-/// service waits for its next request, and a task for its schedule. Where
-/// the engine's daemon runs, it does this itself.
+/// service waits for its next request, and a task for its schedule.
+///
+/// Where the engine's daemon runs, it brings back the containers whose
+/// supervisor was killed, and this waits for it to have done so. A
+/// container that exited when the device shut down, as an app does on
+/// SIGTERM, is not the daemon's business: under a restart policy of "on
+/// failure", nothing would start it again before a visitor came.
 pub fn revive(root: []const u8, bin: [:0]const u8, envp: engine.Envp, env: *std.process.Environ.Map) void {
     // Started at boot beside PocketHarbor, the daemon may take a moment.
     sys.sleepMs(5000);
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    if (engine.daemonRunning(a, env)) return;
+    // Until it has, an orphaned container still reads as running, so the
+    // two never start the same one.
+    if (engine.daemonRunning(a, env)) sys.sleepMs(daemon_grace_ms);
     const store: Store = .{ .a = a, .root = root };
     var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
     for (store.list() catch return) |svc| {
@@ -848,6 +870,8 @@ pub fn revive(root: []const u8, bin: [:0]const u8, envp: engine.Envp, env: *std.
         thread.detach();
     }
 }
+
+const daemon_grace_ms = 15_000;
 
 fn reviveOne(root: []const u8, bin: [:0]const u8, envp: engine.Envp, id: []const u8) void {
     defer std.heap.smp_allocator.free(id);
