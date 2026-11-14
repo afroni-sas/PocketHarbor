@@ -78,20 +78,26 @@ const Log = struct {
     }
 };
 
-/// Waits for the container to listen. Without a declared port it takes the
-/// one the app was told through $PORT, or else the first it opened.
-fn waitForPort(eng: *Engine, container: []const u8, want: u16, deadline: i128) !struct { container: u16, host: u16 } {
+/// The port the app serves on, and the host port behind it. Without a
+/// declared port it is the one the app was told through $PORT, or else the
+/// first it opened.
+fn servedPort(info: engine.Info, want: u16) ?engine.PortEntry {
+    if (want != 0) {
+        const h = info.hostPort(want) orelse return null;
+        return .{ .container = want, .host = h };
+    }
+    if (info.hostPort(default_port)) |h| return .{ .container = default_port, .host = h };
+    if (info.ports.len > 0) return info.ports[0];
+    return null;
+}
+
+/// Waits for the container to listen.
+fn waitForPort(eng: *Engine, container: []const u8, want: u16, deadline: i128) !engine.PortEntry {
     while (sys.monoNs() < deadline) {
         const info = eng.inspect(container) orelse return error.ContainerGone;
         // Its restart policy would hide a crash until the deadline.
         if (!info.alive() or info.restarts > 0) return error.ContainerExited;
-        if (want != 0) {
-            if (info.hostPort(want)) |h| return .{ .container = want, .host = h };
-        } else if (info.hostPort(default_port)) |h| {
-            return .{ .container = default_port, .host = h };
-        } else if (info.ports.len > 0) {
-            return .{ .container = info.ports[0].container, .host = info.ports[0].host };
-        }
+        if (servedPort(info, want)) |p| return p;
         sys.sleepMs(250);
     }
     return error.NoPortOpened;
@@ -758,6 +764,18 @@ fn withoutColours(a: Allocator, s: []const u8) ![]const u8 {
     return out.items;
 }
 
+test "the port a service serves on, and the host port behind it" {
+    const ports = [_]engine.PortEntry{ .{ .container = 9229, .host = 20000 }, .{ .container = 8080, .host = 20001 } };
+    const info: engine.Info = .{ .status = "running", .ports = &ports };
+    // Declared, or told through $PORT, or else the first one opened.
+    try std.testing.expectEqual(@as(u16, 20000), servedPort(info, 9229).?.host);
+    try std.testing.expectEqual(@as(u16, 20001), servedPort(info, 0).?.host);
+    try std.testing.expectEqual(@as(?engine.PortEntry, null), servedPort(info, 3000));
+    const other = [_]engine.PortEntry{.{ .container = 3000, .host = 3000 }};
+    try std.testing.expectEqual(@as(u16, 3000), servedPort(.{ .ports = &other }, 0).?.container);
+    try std.testing.expectEqual(@as(?engine.PortEntry, null), servedPort(.{}, 0));
+}
+
 test "a container's exit says its code and its last line" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -838,6 +856,85 @@ fn reviveOne(root: []const u8, bin: [:0]const u8, envp: engine.Envp, id: []const
     const a = arena.allocator();
     var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
     wake(.{ .a = a, .root = root }, &eng, id);
+}
+
+const follow_ms = 2000;
+
+/// Keeps each route on the host port its container listens on now. The
+/// engine gives a container the port it asks for while that port is free,
+/// and another one when not, so a container brought back without
+/// PocketHarbor, by the engine's daemon after a reboot or by its restart
+/// policy, can come back on another port, even on one that another service
+/// had before. Its route would then lead to that other service.
+pub fn followPorts(root: []const u8, bin: [:0]const u8, envp: engine.Envp) void {
+    while (true) {
+        {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const store: Store = .{ .a = a, .root = root };
+            var eng: Engine = .{ .a = a, .bin = bin, .envp = envp };
+            if (refreshPorts(store, &eng) > 0) store.syncRoutes();
+        }
+        sys.sleepMs(follow_ms);
+    }
+}
+
+/// Records the host port of each running service whose port moved, and
+/// says how many did. A service whose port is not known yet, while another
+/// service's container now has its old one, gets none: its requests then
+/// wait for it, as for a sleeping service, instead of reaching the other.
+pub fn refreshPorts(store: Store, eng: *Engine) usize {
+    const services = store.list() catch return 0;
+    const infos = store.a.alloc(?engine.Info, services.len) catch return 0;
+    for (services, infos) |svc, *info| info.* = if (svc.container.len == 0) null else eng.inspect(svc.container);
+
+    var moved: usize = 0;
+    for (services, infos, 0..) |svc, found, i| {
+        if (svc.container.len == 0 or svc.asleep or svc.cron.len > 0) continue;
+        const info = found orelse continue;
+        const served: ?u16 = if (!info.running()) null else if (servedPort(info, svc.port)) |p| p.host else null;
+        const host: u16 = served orelse
+            if (svc.host_port != 0 and heldByOther(infos, i, svc.host_port)) 0 else continue;
+        if (host == svc.host_port) continue;
+
+        const lock = store.lock() catch continue;
+        defer store.unlock(lock);
+        var current = store.load(store.idOf(svc)) catch continue;
+        // A deployment or a sleep got there first.
+        if (!std.mem.eql(u8, current.container, svc.container) or current.asleep) continue;
+        if (current.host_port == host) continue;
+        if (host == 0) {
+            sys.print("{s}: another service has its port {d} now; its requests wait for it\n", .{ store.idOf(svc), current.host_port });
+        } else {
+            sys.print("{s}: its container now listens on host port {d} (was {d})\n", .{ store.idOf(svc), host, current.host_port });
+        }
+        current.host_port = host;
+        store.save(current) catch continue;
+        moved += 1;
+    }
+    return moved;
+}
+
+fn heldByOther(infos: []const ?engine.Info, self: usize, host_port: u16) bool {
+    for (infos, 0..) |found, j| {
+        if (j == self) continue;
+        const info = found orelse continue;
+        if (!info.alive()) continue;
+        for (info.ports) |p| if (p.host == host_port) return true;
+    }
+    return false;
+}
+
+/// The service whose container holds this host port.
+pub fn holderOf(store: Store, eng: *Engine, host_port: u16) ?Service {
+    for (store.list() catch return null) |svc| {
+        if (svc.container.len == 0) continue;
+        const info = eng.inspect(svc.container) orelse continue;
+        if (!info.alive()) continue;
+        for (info.ports) |p| if (p.host == host_port) return svc;
+    }
+    return null;
 }
 
 /// Stops an idle service. The route is updated last, so that a request

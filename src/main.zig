@@ -301,6 +301,41 @@ fn lockProxy(c: *Ctx) !i32 {
     return fd;
 }
 
+/// Containers moved off the proxy's port, to start again once the proxy
+/// holds it for good: started earlier, they could take it back.
+const Moved = struct {
+    names: [4][]const u8 = undefined,
+    n: usize = 0,
+
+    fn startAll(self: *Moved, eng: *Engine) void {
+        for (self.names[0..self.n]) |name| _ = eng.start(name);
+        self.n = 0;
+    }
+};
+
+/// Binds the proxy's port. At boot, the engine's daemon may bring services
+/// back before the proxy starts, and the engine lets a container have the
+/// port it asks for while that port is free: a service told PORT=8080 next
+/// to a proxy on 8080 would then get every request, the dashboard's
+/// included. Such a container is moved: stopped, and later started again,
+/// which puts it on another port. Its route follows it there.
+fn bindProxy(c: *Ctx, addr: net.Addr, moved: *Moved) !i32 {
+    var tries: usize = 0;
+    while (true) : (tries += 1) {
+        return net.listenTcp(addr) catch |e| {
+            if (sys.last != .ADDRINUSE) return e;
+            const holder = (if (tries < moved.names.len and moved.n < moved.names.len) deploy.holderOf(c.store, c.eng, addr.port) else null) orelse
+                die("port {d} is already in use", .{addr.port});
+            sys.eprint("port {d} is held by the service {s}: moving it to another port\n", .{ addr.port, c.store.idOf(holder) });
+            c.eng.stop(holder.container, 10);
+            moved.names[moved.n] = holder.container;
+            moved.n += 1;
+            sys.sleepMs(200);
+            continue;
+        };
+    }
+}
+
 fn detach(c: *Ctx) void {
     const pid = sys.fork() catch die("cannot fork", .{});
     if (pid != 0) linux.exit_group(0);
@@ -398,6 +433,8 @@ fn cmdPanel(c: *Ctx, _: []const [:0]const u8) !void {
     checker.detach();
     const reviver = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, deploy.revive, .{ c.store.root, c.eng.bin, c.envp, c.env });
     reviver.detach();
+    const follower = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, deploy.followPorts, .{ c.store.root, c.eng.bin, c.envp });
+    follower.detach();
     try httpd.serveOn(try panelListener(c, s.panel_port), api.handle, panel);
 }
 
@@ -831,12 +868,8 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
     }
     _ = try lockProxy(c);
     // Before detaching, so that a mistake is seen in the terminal.
-    var probe = net.listenTcp(addr) catch |e| {
-        if (sys.last == .ADDRINUSE) die("port {d} is already in use", .{addr.port});
-        return e;
-    };
-    sys.close(probe);
-    probe = -1;
+    var moved: Moved = .{};
+    sys.close(try bindProxy(c, addr, &moved));
 
     if (background) {
         detach(c);
@@ -849,6 +882,11 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
     try c.store.saveSettings(s);
     proxy.installSignals();
     try c.store.writeProxyPid();
+    // Again: a container may have taken the port since.
+    const listener = try bindProxy(c, addr, &moved);
+    moved.startAll(c.eng);
+    // Services the engine's daemon brought back may be on other ports.
+    _ = deploy.refreshPorts(c.store, c.eng);
     c.store.syncRoutes();
 
     var p: proxy.Proxy = .{
@@ -858,7 +896,7 @@ fn cmdServe(c: *Ctx, args: []const [:0]const u8) !void {
         .envp = c.envp,
         .table = routes.Table.empty(c.gpa),
     };
-    try p.run(addr);
+    try p.run(addr, listener);
     var pid = try sys.Path.of(c.store.path("proxy.pid"));
     sys.unlink(pid.z()) catch {};
     // Everything it holds goes away with the process.
