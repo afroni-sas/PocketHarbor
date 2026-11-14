@@ -178,11 +178,9 @@ pub const Proxy = struct {
     logs: std.StringHashMapUnmanaged(LogFile) = .empty,
     last_tick: i128 = 0,
 
-    pub fn run(self: *Proxy, addr: net.Addr) !void {
-        self.listener = net.listenTcp(addr) catch |e| {
-            if (sys.last == .ADDRINUSE) sys.eprint("error: port {d} is already in use\n", .{addr.port});
-            return e;
-        };
+    /// Serves on `listener`, a socket already listening on `addr`.
+    pub fn run(self: *Proxy, addr: net.Addr, listener: i32) !void {
+        self.listener = listener;
         self.ep = @intCast(try sys.ck(linux.epoll_create1(linux.EPOLL.CLOEXEC)));
         var ev: linux.epoll_event = .{ .events = EPOLL.IN, .data = .{ .u64 = 0 } };
         _ = try sys.ck(linux.epoll_ctl(self.ep, EPOLL.CTL_ADD, self.listener, &ev));
