@@ -388,6 +388,14 @@ own_port() {
     [ "$(sed -n 's/.*"proxy_port": *\([0-9]*\).*/\1/p' "$DATA/settings.json" 2>/dev/null | head -n 1)" = "$1" ]
 }
 
+# True when a service of this installation holds PORT. Brought back at
+# boot by the engine's daemon before PocketHarbor, a service may take its
+# port; PocketHarbor moves it to another port when it starts.
+service_holds() {
+    [ -f "$DATA/settings.json" ] && [ -x "$INSTALL_DIR/pdock" ] || return 1
+    PD ps 2>/dev/null | grep -v ' pharbor-tunnel ' | grep -Eq "(^| |,)$1->"
+}
+
 # What is wrong with PORT, or nothing.
 port_problem() {
     case "$1" in '' | *[!0-9]*)
@@ -404,6 +412,7 @@ port_problem() {
         return
     fi
     own_port "$1" && return
+    service_holds "$1" && return
     if listening "$1"; then
         who=$(port_owner "$1")
         echo "Port $1 is already in use${who:+ by $who}."
